@@ -18,3 +18,5 @@
 
 
 from .radiation_function import RadiationFunction
+from .regular_grid_emitters import *
+from .regular_grid_objects import *

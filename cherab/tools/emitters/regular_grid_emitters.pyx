@@ -17,8 +17,6 @@
 #
 # See the Licence for the specific language governing permissions and limitations
 # under the Licence.
-#
-# The following code is created by Vladislav Neverov (NRC "Kurchatov Institute") for CHERAB Spectroscopy Modelling Framework
 
 """
 The following emitters and integrators are used in ray transfer objects.
@@ -98,17 +96,23 @@ cdef class CylindricalRegularIntegrator(RegularGridIntegrator):
         cdef:
             Point3D start, end
             Vector3D direction
-            int isample, ispec, it, ir, iphi, iz, ir_current, iphi_current, iz_current, n, nphi, nspec
+            int ibin, ispec, it, ir, iphi, iz, ir_current, iphi_current, iz_current, n, nphi, nspec
             double length, t, dt, x, y, z, r, phi, dr, dz, dphi, rmin, period, res
             double[:, :, :, ::1] emission_mv
             int[:] spectral_index_mv
 
         if not isinstance(material, CylindricalRegularEmitter):
             raise TypeError('Only CylindricalRegularEmitter material is supported by CylindricalRegularIntegrator.')
+        if material.min_wavelength != spectrum.min_wavelength:
+            raise ValueError("Attributes 'min_wavelength' of the objects 'material' and 'spectrum' must be equal.")
+        if material.max_wavelength != spectrum.max_wavelength:
+            raise ValueError("Attributes 'max_wavelength' of the objects 'material' and 'spectrum' must be equal.")
+        if material.bins != spectrum.bins:
+            raise ValueError("Attributes 'bins' of the objects 'material' and 'spectrum' must be equal.")
         start = start_point.transform(world_to_primitive)  # start point in local coordinates
         end = end_point.transform(world_to_primitive)  # end point in local coordinates
         direction = start.vector_to(end)  # direction of integration
-        length = direction.length  # integration length
+        length = direction.get_length()  # integration length
         if length < 0.1 * self._step:  # return if ray's path is too short
             return spectrum
         direction = direction.normalise()  # normalized direction
@@ -117,16 +121,16 @@ cdef class CylindricalRegularIntegrator(RegularGridIntegrator):
         # cython performs checks on attributes of external class, so it's better to do the checks before the loop
         emission_mv = material.emission_mv
         spectral_index_mv = material.spectral_index_mv
-        nspec = material.spectral_index.size
+        nspec = material.emission.shape[3]
         nphi = material.emission.shape[1]
         dz = material.dz
         dr = material.dr
         dphi = material.dphi
         period = material.period
         rmin = material.rmin
-        ir_current = -1
-        iphi_current = -1
-        iz_current = -1
+        ir_current = 0
+        iphi_current = 0
+        iz_current = 0
         res = 0
         for it in range(n):
             t = (it + 0.5) * dt
@@ -145,16 +149,18 @@ cdef class CylindricalRegularIntegrator(RegularGridIntegrator):
             if ir != ir_current or iphi != iphi_current or iz != iz_current:  # we moved to the next cell
                 if res:
                     for ispec in range(nspec):
-                        isample = spectral_index_mv[ispec]
-                        spectrum.samples_mv[isample] += res * emission_mv[ir, iphi, iz, ispec]
+                        ibin = spectral_index_mv[ispec]
+                        if ibin > -1:
+                            spectrum.samples_mv[ibin] += res * emission_mv[ir_current, iphi_current, iz_current, ispec]
                 ir_current = ir
                 iphi_current = iphi
                 iz_current = iz
                 res = 0
             res += dt
         for ispec in range(nspec):
-            isample = spectral_index_mv[ispec]
-            spectrum.samples_mv[isample] += res * emission_mv[ir, iphi, iz, ispec]
+            ibin = spectral_index_mv[ispec]
+            if ibin > -1:
+                spectrum.samples_mv[ibin] += res * emission_mv[ir_current, iphi_current, iz_current, ispec]
 
         return spectrum
 
@@ -180,32 +186,38 @@ cdef class CartesianRegularIntegrator(RegularGridIntegrator):
         cdef:
             Point3D start, end
             Vector3D direction
-            int indx, i, it, ix, iy, iz, icell, icell_current, n, ny, nz, nspec
+            int ibin, ispec, it, ix, iy, iz, ix_current, iy_current, iz_current, n, nspec
             double length, t, dt, x, y, z, dx, dy, dz, res
-            double[:] emissivity_mv
+            double[:, :, :, ::1] emission_mv
             int[:] spectral_index_mv
 
-        if not isinstance(material, CartesianRayTransferEmitter):
-            raise TypeError('Only CartesianRayTransferEmitter material is supported by CartesianRayTransferIntegrator')
+        if not isinstance(material, CartesianRegularEmitter):
+            raise TypeError('Only CartesianRegularEmitter material is supported by CartesianRegularIntegrator')
+        if material.min_wavelength != spectrum.min_wavelength:
+            raise ValueError("Attributes 'min_wavelength' of the objects 'material' and 'spectrum' must be equal.")
+        if material.max_wavelength != spectrum.max_wavelength:
+            raise ValueError("Attributes 'max_wavelength' of the objects 'material' and 'spectrum' must be equal.")
+        if material.bins != spectrum.bins:
+            raise ValueError("Attributes 'bins' of the objects 'material' and 'spectrum' must be equal.")
         start = start_point.transform(world_to_primitive)  # start point in local coordinates
         end = end_point.transform(world_to_primitive)  # end point in local coordinates
         direction = start.vector_to(end)  # direction of integration
-        length = direction.length  # integration length
-        if length < 0.1 * self.step:  # return if ray's path is too short
+        length = direction.get_length()  # integration length
+        if length < 0.1 * self._step:  # return if ray's path is too short
             return spectrum
         direction = direction.normalise()  # normalized direction
-        n = max(self.min_samples, <int>(length / self.step))  # number of points along ray's trajectory
+        n = max(self._min_samples, <int>(length / self._step))  # number of points along ray's trajectory
         dt = length / n  # integration step
         # cython performs checks on attributes of external class, so it's better to do the checks before the loop
-        emissivity_mv = material.emissivity_mv
+        emission_mv = material.emission_mv
         spectral_index_mv = material.spectral_index_mv
-        nspec = material.spectral_index.size
-        ny = material.emissivity.shape[1]  # not used in 2d case
-        nz = material.emissivity.shape[2]
+        nspec = material.emission.shape[3]
         dx = material.dx
         dy = material.dy
         dz = material.dz
-        icell_current = 0
+        ix_current = 0
+        iy_current = 0
+        iz_current = 0
         res = 0
         for it in range(n):
             t = (it + 0.5) * dt
@@ -215,24 +227,26 @@ cdef class CartesianRegularIntegrator(RegularGridIntegrator):
             ix = <int>(x / dx)  # X-indices of grid cells, in which the points are located
             iy = <int>(y / dy)  # Y-indices of grid cells, in which the points are located
             iz = <int>(z / dz)  # Z-indices of grid cells, in which the points are located
-            icell = ny * nz * ix + nz * iy + iz  # 1d cell index
-            if icell != icell_current:  # we moved to the next cell
-                icell_current *= nspec  # to flat index
-                for i in range(nspec):
-                    indx = spectral_index_mv[i]
-                    spectrum.samples_mv[indx] += res * emissivity_mv[icell_current + i]
-                icell_current = icell
+            if ix != ix_current or iy != iy_current or iz != iz_current:  # we moved to the next cell
+                if res:
+                    for ispec in range(nspec):
+                        ibin = spectral_index_mv[ispec]
+                        if ibin > -1:
+                            spectrum.samples_mv[ibin] += res * emission_mv[ix_current, iy_current, iz_current, ispec]
+                ix_current = ix
+                iy_current = iy
+                iz_current = iz
                 res = 0
             res += dt
-        icell_current *= nspec  # to flat index
-        for i in range(nspec):
-            indx = spectral_index_mv[i]
-            spectrum.samples_mv[indx] += res * emissivity_mv[icell_current + i]
+        for ispec in range(nspec):
+            ibin = spectral_index_mv[ispec]
+            if ibin > -1:
+                spectrum.samples_mv[ibin] += res * emission_mv[ix_current, iy_current, iz_current, ispec]
 
         return spectrum
 
 
-cdef class RegularGridEmitter(InhomogeneousVolumeEmitter):
+cdef class RegularGridLineEmitter(InhomogeneousVolumeEmitter):
     """
     Basic class for ray transfer emitters defined on a regular grid. Ray transfer emitters
     are used to calculate ray transfer matrices (geometry matrices) for a single value
@@ -265,88 +279,138 @@ cdef class RegularGridEmitter(InhomogeneousVolumeEmitter):
     """
 
     cdef:
-        tuple _grid_shape, _grid_steps
-        int _bins
-        np.ndarray _emissivity
+        int[3] _grid_shape
+        double[3] _grid_steps
+        double _min_wavelength, _max_wavelength
+        int _bins, _n_spec
+        np.ndarray _emission, _spectral_index
+        dict _spectral_line_bin
         public:
-            double[:] emissivity_mv
+            double[:, :, :, ::1] emission_mv
             int[:] spectral_index_mv
 
-    def __init__(self, tuple grid_steps, list emissivities, list wavelengths, double min_wavelength, double max_wavelength,
-                 int bins, VolumeIntegrator integrator=None):
+    @cython.wraparound(False)
+    def __init__(self, dict line_emission, tuple grid_steps, max_wavelength_step=1., VolumeIntegrator integrator=None):
 
         cdef:
-            int i
-            double step
+            int i, n_wave
+            double step, delta_wavelength
+            touple shape
+            np.array wavelength
+            double[:] wavelength_mv
 
-        if len(grid_shape) != len(grid_steps):
-            raise ValueError('Grid dimension %d is not equal to the number of grid steps given: %d' % (len(grid_shape), len(grid_steps)))
-        for i in grid_shape:
-            if i < 1:
-                raise ValueError('Number of grid cells must be > 0')
+        # checking and assigning grid_steps
         for step in grid_steps:
             if step <= 0:
-                raise ValueError('Grid steps must be > 0')
-        # grid_shape and grid_steps are defined on initialisation and must not be changed after that
-        self._grid_shape = grid_shape
+                raise ValueError('Grid steps must be > 0.')
         self._grid_steps = grid_steps
-        if voxel_map is None:
-            self.mask = mask
-        else:
-            self.voxel_map = voxel_map
+
+        # checking line_emission and assigning grid_shape
+        if not line_emission:
+            raise ValueError("Argument 'line_emission' is an empty dictionary.")
+        shape = next(iter(line_emission.values())).shape
+        for value in line_emission.values():
+            if value.shape != shape:
+                raise ValueError("All arrays in 'line_emission' dictionary must be of the same shape.")
+        self._grid_shape = shape
+
+        if max_wavelength_step <= 0:
+            raise ValueError("Argument 'max_wavelength_step' must be > 0.")
+
+        # determining minimal distance between spectral lines in line_emission
+        wavelength = np.array(line_emission.keys())
+        wavelength_mv = wavelength
+        self._n_spec = wavelength.size
+        delta_wavelength = max_wavelength_step
+        for i in range(self._n_spec):
+            for j in range(i + 1, self._n_spec):
+                delta_wavelength = min(delta_wavelength, abs(wavelength_mv[j] - wavelength_mv[i]))
+
+        # setting wavelength
+        self._min_wavelength = wavelength.min() - 0.5 * delta_wavelength
+        self._max_wavelength = wavelength.max() + 0.5 * delta_wavelength
+        self._bins = <int>((self._max_wavelength - self._min_wavelength) / delta_wavelength) + 1
+        delta_wavelength = (self._max_wavelength - self._min_wavelength) / self._bins
+
+        # creating and filling the emission array, spectral_index array and spectral_line_bin dictionary
+        self._emission = np.zeros((self._grid_shape[0], self._grid_shape[1], self._grid_shape[2], self._n_spec))
+        self.emission_mv = self._emission
+        self._spectral_index = np.zeros(self._n_spec, dtype=np.int32)
+        self.spectral_index_mv = self._spectral_index
+
+        self._spectral_line_bin = {}
+
+        for i in range(self._n_spec):
+            self.spectral_index_mv[i] = <int>((wavelength_mv[i] - self._min_wavelength) / delta_wavelength)
+            self._emission[:, :, :, i] = line_emission[wavelength_mv[i]] / delta_wavelength
+            self._spectral_line_bin[wavelength_mv[i]] = self._spectral_index_mv[i]
+
         super().__init__(integrator)
+
+    @cython.cdivision(True)
+    @cython.nonecheck(False)
+    cpdef set_wavelength(self, double min_wavelength, double max_wavelength, int bins):
+
+        cdef:
+            int i, index_new
+            double delta_wavelength_old, delta_wavelength
+            double wavelength
+
+        if min_wavelength >= max_wavelength:
+            raise ValueError("Argument 'max_wavelength' must be > then 'min_wavelength'.")
+
+        if bins < 1:
+            raise ValueError("Argument 'bins' must be >= 1.")
+
+        delta_wavelength_old = (self._max_wavelength - self._min_wavelength) / self._bins
+        self._min_wavelength = min_wavelength
+        self._max_wavelength = max_wavelength
+        self._bins = bins
+        delta_wavelength = (self._max_wavelength - self._min_wavelength) / self._bins
+
+        self._emission *= delta_wavelength_old / delta_wavelength
+
+        for i, wavelength in enumerate(self._spectral_line_bin.keys()):
+            index_new = <int>((wavelength - self._min_wavelength) / delta_wavelength)
+            if index_new < 0 or index_new >= self._bins:
+                index_new = -1
+            self.spectral_index_mv[i] = index_new
+            self._spectral_line_bin[wavelength] = index_new
 
     @property
     def grid_shape(self):
-        return self._grid_shape
+        return <tuple>self._grid_shape
 
     @property
     def grid_steps(self):
-        return self._grid_steps
+         return <tuple>self._grid_steps
 
-    cdef np.ndarray _map_from_mask(self, mask):
-        if mask is not None:
-            if mask.shape != self._grid_shape:
-                raise ValueError('Mask array must be of shape: %s' % (' '.join(['%d' % i for i in self._grid_shape])))
-            if mask.dtype != np.bool:
-                raise ValueError('Mask array must be of numpy.bool type')
-        else:
-            mask = np.ones(self._grid_shape, dtype=np.bool)
-        voxel_map = -1 * np.ones(mask.shape, dtype=np.int32)
-        voxel_map[mask] = np.arange(mask.sum(), dtype=np.int32)
+    @property
+    def min_wavelength(self):
+        return self._min_wavelength
 
-        return voxel_map
+    @property
+    def max_wavelength(self):
+        return self._max_wavelength
 
     @property
     def bins(self):
         return self._bins
 
     @property
-    def voxel_map(self):
-        return self._voxel_map
-
-    @voxel_map.setter
-    def voxel_map(self, value):
-        if value.shape != self._grid_shape:
-            raise ValueError('Voxel_map array must be of shape: %s' % (' '.join(['%d' % i for i in self._grid_shape])))
-        if value.dtype != np.int:
-            raise ValueError('Voxel_map array must be of numpy.int type')
-        self._voxel_map = value.astype(np.int32)
-        self.voxel_map_mv = self._voxel_map.ravel()
-        self._bins = self._voxel_map.max() + 1
+    def spectral_line_bin(self):
+        return self._spectral_line_bin
 
     @property
-    def mask(self):
-        return self._voxel_map > -1
+    def spectral_index(self):
+        return self._spectral_index
 
-    @mask.setter
-    def mask(self, value):
-        self._voxel_map = self._map_from_mask(value)
-        self.voxel_map_mv = self._voxel_map.ravel()
-        self._bins = self._voxel_map.max() + 1
+    @property
+    def emission(self):
+        return self._emission
 
 
-cdef class CylindricalRayTransferEmitter(RayTransferEmitter):
+cdef class CylindricalRegularLineEmitter(RegularGridLineEmitter):
     """
     A unit emitter defined on a regular 2D (RZ plane) or 3D :math:`(R, \phi, Z)` grid, which
     can be used to calculate ray transfer matrices (geometry matrices) for a single value
@@ -413,24 +477,22 @@ cdef class CylindricalRayTransferEmitter(RayTransferEmitter):
     cdef:
         double _dr, _dphi, _dz, _period, _rmin
 
-    def __init__(self, tuple grid_shape, tuple grid_steps, np.ndarray voxel_map=None, np.ndarray mask=None, VolumeIntegrator integrator=None,
-                 double rmin=0, double period=360.):
+    def __init__(self, dict line_emission, tuple grid_steps, max_wavelength_step=1., VolumeIntegrator integrator=None, double rmin=0):
 
         cdef:
-            double def_integration_step
+            double def_integration_step, period
 
-        if not 1 < len(grid_shape) < 4:
-            raise ValueError('grid_shape must contain 2 or 3 elements')
-        if not 1 < len(grid_steps) < 4:
-            raise ValueError('grid_steps must contain 2 or 3 elements')
-        def_integration_step = 0.1 * min(grid_steps[0], grid_steps[-1])
-        integrator = integrator or CylindricalRayTransferIntegrator(def_integration_step)
-        super().__init__(grid_shape, grid_steps, voxel_map=voxel_map, mask=mask, integrator=integrator)
-        self.period = period
+        def_integration_step = 0.25 * min(grid_steps[0], grid_steps[-1])
+        integrator = integrator or CylindricalRegularIntegrator(def_integration_step)
+        super().__init__(line_emission, grid_steps, max_wavelength_step=max_wavelength_step, integrator=integrator)
         self.rmin = rmin
-        self._dr = self.grid_steps[0]
-        self._dphi = self.grid_steps[1] if len(self.grid_steps) == 3 else 0
-        self._dz = self.grid_steps[-1]
+        self._dr = self._grid_steps[0]
+        self._dphi = self._grid_steps[1]
+        self._dz = self._grid_steps[2]
+        period = self._grid_shape[1] * self._grid_steps[1]
+        if 360. % period > 1.e-3:
+            raise ValueError("The period %.3f (grid_shape[1] * grid_steps[1]) is not a multiple of 360." % period)
+        self._period = period
 
     @property
     def rmin(self):
@@ -439,21 +501,12 @@ cdef class CylindricalRayTransferEmitter(RayTransferEmitter):
     @rmin.setter
     def rmin(self, value):
         if value < 0:
-            raise ValueError('rmin must be >= 0')
+            raise ValueError("Attribute 'rmin' must be >= 0.")
         self._rmin = value
 
     @property
     def period(self):
         return self._period
-
-    @period.setter
-    def period(self, value):
-        if len(self._grid_shape) < 3:
-            self._period = 0
-            return
-        if not 0 < value <= 360.:
-            raise ValueError('period must be > 0 and <= 360')
-        self._period = value
 
     @property
     def dr(self):
@@ -467,34 +520,42 @@ cdef class CylindricalRayTransferEmitter(RayTransferEmitter):
     def dz(self):
         return self._dz
 
+    @cython.wraparound(False)
+    @cython.cdivision(True)
+    @cython.initializedcheck(False)
+    @cython.nonecheck(False)
     cpdef Spectrum emission_function(self, Point3D point, Vector3D direction, Spectrum spectrum,
                                      World world, Ray ray, Primitive primitive,
                                      AffineMatrix3D world_to_primitive, AffineMatrix3D primitive_to_world):
 
         cdef:
-            int isource, ir, iphi, iz, icell
+            int ir, iphi, iz, ispec, ibin
             double r, phi
 
+        if self._min_wavelength != spectrum.min_wavelength:
+            raise ValueError("Attributes 'min_wavelength' of the objects 'material' and 'spectrum' must be equal.")
+        if self._max_wavelength != spectrum.max_wavelength:
+            raise ValueError("Attributes 'max_wavelength' of the objects 'material' and 'spectrum' must be equal.")
+        if self._bins != spectrum.bins:
+            raise ValueError("Attributes 'bins' of the objects 'material' and 'spectrum' must be equal.")
         iz = <int>(point.z / self._dz)  # Z-index of grid cell, in which the point is located
         r = sqrt(point.x * point.x + point.y * point.y)  # R coordinates of the points
         ir = <int>((r - self._rmin) / self._dr)  # R-index of grid cell, in which the points is located
-        if self.voxel_map.ndim > 2:  # 3D grid
-            phi = (180. / pi) * atan2(point.y, point.x)  # phi coordinate of the point (in degrees)
-            if phi < 0:
-                phi += 360.  # moving to [0, 360) interval
-            phi = phi % self._period  # moving into the [0, period) sector (periodic emitter)
-            iphi = <int>(phi / self._dphi)  # phi-index of grid cell, in which the point is located
-            icell = self._voxel_map.shape[1] * self._voxel_map.shape[2] * ir + self._voxel_map.shape[2] * iphi + iz
+        if self._grid_shape[1] == 1:  # axisymmetric case
+            iphi = 0
         else:
-            icell = self._voxel_map.shape[1] * ir + iz
-        isource = self.voxel_map_mv[icell]  # index of the light source in spectral array
-        if isource < 0:  # grid cell is not mapped to any light source
-            return spectrum
-        spectrum.samples_mv[isource] += 1.  # unit emissivity
+            phi = (180. / pi) * atan2(point.y, point.x)  # phi coordinate of the point (in degrees)
+            phi = (phi + 360) % self._period  # moving into the [0, period) sector (periodic emitter)
+            iphi = <int>(phi / self._dphi)  # phi-index of grid cell, in which the point is located
+        for ispec in range(self._n_spec):
+            ibin = spectral_index_mv[ispec]
+            if ibin > -1:
+                spectrum.samples_mv[ibin] += self.emission_mv[ir, iphi, iz, ispec]
+
         return spectrum
 
 
-cdef class CartesianRayTransferEmitter(RayTransferEmitter):
+cdef class CartesianRegularLineEmitter(RegularGridLineEmitter):
     """
     A unit emitter defined on a regular 3D :math:`(X, Y, Z)` grid, which can be used
     to calculate ray transfer matrices (geometry matrices).
@@ -550,21 +611,17 @@ cdef class CartesianRayTransferEmitter(RayTransferEmitter):
     cdef:
         double _dx, _dy, _dz
 
-    def __init__(self, tuple grid_shape, tuple grid_steps, np.ndarray voxel_map=None, np.ndarray mask=None, VolumeIntegrator integrator=None):
+    def __init__(self, dict line_emission, tuple grid_steps, max_wavelength_step=1., VolumeIntegrator integrator=None):
 
         cdef:
             double def_integration_step
 
-        if len(grid_shape) != 3:
-            raise ValueError('grid_shape must contain 3 elements')
-        if len(grid_steps) != 3:
-            raise ValueError('grid_steps must contain 3 elements')
-        def_integration_step = 0.1 * min(grid_steps)
+        def_integration_step = 0.25 * min(grid_steps)
         integrator = integrator or CartesianRayTransferIntegrator(def_integration_step)
-        super().__init__(grid_shape, grid_steps, voxel_map=voxel_map, mask=mask, integrator=integrator)
-        self._dx = self.grid_steps[0]
-        self._dy = self.grid_steps[1]
-        self._dz = self.grid_steps[2]
+        super().__init__(line_emission, grid_steps, max_wavelength_step=max_wavelength_step, integrator=integrator)
+        self._dx = self._grid_steps[0]
+        self._dy = self._grid_steps[1]
+        self._dz = self._grid_steps[2]
 
     @property
     def dx(self):
@@ -583,14 +640,20 @@ cdef class CartesianRayTransferEmitter(RayTransferEmitter):
                                      AffineMatrix3D world_to_primitive, AffineMatrix3D primitive_to_world):
 
         cdef:
-            int isource, ix, iy, iz, icell
+            int isource, ix, iy, iz, ispec, ibin
 
+        if self._min_wavelength != spectrum.min_wavelength:
+            raise ValueError("Attributes 'min_wavelength' of the objects 'material' and 'spectrum' must be equal.")
+        if self._max_wavelength != spectrum.max_wavelength:
+            raise ValueError("Attributes 'max_wavelength' of the objects 'material' and 'spectrum' must be equal.")
+        if self._bins != spectrum.bins:
+            raise ValueError("Attributes 'bins' of the objects 'material' and 'spectrum' must be equal.")
         ix = <int>(point.x / self._dx)  # X-index of grid cell, in which the point is located
         iy = <int>(point.y / self._dy)  # Y-index of grid cell, in which the point is located
         iz = <int>(point.z / self._dz)  # Z-index of grid cell, in which the point is located
-        icell = self._voxel_map.shape[1] * self._voxel_map.shape[2] * ix + self._voxel_map.shape[2] * iy + iz
-        isource = self.voxel_map_mv[icell]  # index of the light source in spectral array
-        if isource < 0:  # grid cell is not mapped to any light source
-            return spectrum
-        spectrum.samples_mv[isource] += 1.  # unit emissivity
+        for ispec in range(self._n_spec):
+            ibin = spectral_index_mv[ispec]
+            if ibin > -1:
+                spectrum.samples_mv[ibin] += self.emission_mv[ix, iy, iz, ispec]
+
         return spectrum
