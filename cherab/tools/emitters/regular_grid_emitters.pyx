@@ -19,7 +19,7 @@
 # under the Licence.
 
 """
-The following emitters and integrators are used in regular grid objects.
+The following emitters and integrators are used in Regular Grid Volumes.
 They allow fast integration along the ray's trajectory as they use pre-calculated
 values of spectral emissivity on a regular grid.
 Note that these emitters support other integrators as well, however high performance
@@ -100,11 +100,11 @@ cdef class CylindricalRegularIntegrator(RegularGridIntegrator):
         cdef:
             Point3D start, end
             Vector3D direction
-            int i, bins, ibin_start, ray_bins, it, ir, iphi, iz, ir_current, iphi_current, iz_current, n, nphi
+            int i, ivoxel, bins, ibin_start, ray_bins, it, ir, iphi, iz, ir_current, iphi_current, iz_current, n, nphi
             double delta_wavelength, length, t, dt, x, y, z, r, phi, dr, dz, dphi, rmin, period, ray_path
-            double[:, :, :, ::1] emission_mv
-            uint8[:, :, ::1] notempty_mv
-            int[:] spectral_index_mv
+            double[:, ::1] emission_mv
+            int[:, :, ::1] voxel_map_mv
+            int[:] spectral_map_mv
             int *ibin
             int *ispec
 
@@ -119,10 +119,10 @@ cdef class CylindricalRegularIntegrator(RegularGridIntegrator):
         # Determining the spectral emission that fall into the portion of the spectrum sampled by this ray.
         ibin = <int *> malloc(ray_bins * sizeof(int))
         ispec = <int *> malloc(ray_bins * sizeof(int))
-        spectral_index_mv = material.spectral_index_mv
+        spectral_map_mv = material.spectral_map_mv
         bins = 0
-        for i in range(material.emission.shape[3]):
-            ibin[bins] = spectral_index_mv[i] - ibin_start
+        for i in range(material.n_spec):
+            ibin[bins] = spectral_map_mv[i] - ibin_start
             if -1 < ibin[bins] < ray_bins:
                 ispec[bins] = i
                 bins += 1
@@ -133,8 +133,8 @@ cdef class CylindricalRegularIntegrator(RegularGridIntegrator):
 
         # Cython performs checks on attributes of external class, so it's better to do the checks before the loop
         emission_mv = material.emission_mv
-        notempty_mv = material.notempty_mv
-        nphi = material.emission.shape[1]
+        voxel_map_mv = material.voxel_map_mv
+        nphi = material.grid_shape[1]
         dz = material.dz
         dr = material.dr
         dphi = material.dphi
@@ -174,17 +174,19 @@ cdef class CylindricalRegularIntegrator(RegularGridIntegrator):
                 phi = (phi + 360) % period  # moving into the [0, period) sector (periodic emitter)
                 iphi = <int>(phi / dphi)  # phi-indices of grid cells, in which the points are located
             if ir != ir_current or iphi != iphi_current or iz != iz_current:  # we moved to the next cell
-                if notempty_mv[ir_current, iphi_current, iz_current]:  # checking if the cell contains non-zeros data
+                ivoxel = voxel_map_mv[ir_current, iphi_current, iz_current]
+                if ivoxel > -1:  # checking if the cell contains non-zeros data
                     for i in range(bins):
-                        spectrum.samples_mv[ibin[i]] += ray_path * emission_mv[ir_current, iphi_current, iz_current, ispec[i]]
+                        spectrum.samples_mv[ibin[i]] += ray_path * emission_mv[ivoxel, ispec[i]]
                 ir_current = ir
                 iphi_current = iphi
                 iz_current = iz
                 ray_path = 0  # zeroing ray's path along the cell
             ray_path += dt
-        if notempty_mv[ir_current, iphi_current, iz_current]:
+        ivoxel = voxel_map_mv[ir_current, iphi_current, iz_current]
+        if ivoxel > -1:
             for i in range(bins):
-                spectrum.samples_mv[ibin[i]] += ray_path * emission_mv[ir_current, iphi_current, iz_current, ispec[i]]
+                spectrum.samples_mv[ibin[i]] += ray_path * emission_mv[ivoxel, ispec[i]]
 
         free(ibin)
         free(ispec)
@@ -212,11 +214,11 @@ cdef class CartesianRegularIntegrator(RegularGridIntegrator):
         cdef:
             Point3D start, end
             Vector3D direction
-            int i, bins, ibin_start, ray_bins, it, ix, iy, iz, ix_current, iy_current, iz_current, n
+            int i, ivoxel, bins, ibin_start, ray_bins, it, ix, iy, iz, ix_current, iy_current, iz_current, n
             double delta_wavelength, length, t, dt, x, y, z, dx, dy, dz, ray_path
-            double[:, :, :, ::1] emission_mv
-            uint8[:, :, ::1] notempty_mv
-            int[:] spectral_index_mv
+            double[:, ::1] emission_mv
+            int[:, :, ::1] voxel_map_mv
+            int[:] spectral_map_mv
             int *ibin
             int *ispec
 
@@ -231,10 +233,10 @@ cdef class CartesianRegularIntegrator(RegularGridIntegrator):
         # Determining the spectral emission that fall into the portion of the spectrum sampled by this ray.
         ibin = <int *> malloc(ray_bins * sizeof(int))
         ispec = <int *> malloc(ray_bins * sizeof(int))
-        spectral_index_mv = material.spectral_index_mv
+        spectral_map_mv = material.spectral_map_mv
         bins = 0
-        for i in range(material.emission.shape[3]):
-            ibin[bins] = spectral_index_mv[i] - ibin_start
+        for i in range(material.n_spec):
+            ibin[bins] = spectral_map_mv[i] - ibin_start
             if -1 < ibin[bins] < ray_bins:
                 ispec[bins] = i
                 bins += 1
@@ -245,9 +247,8 @@ cdef class CartesianRegularIntegrator(RegularGridIntegrator):
 
         # Cython performs checks on attributes of external class, so it's better to do the checks before the loop
         emission_mv = material.emission_mv
-        notempty_mv = material.notempty_mv
-        spectral_index_mv = material.spectral_index_mv
-        nspec = material.emission.shape[3]
+        voxel_map_mv = material.voxel_map_mv
+        spectral_map_mv = material.spectral_map_mv
         dx = material.dx
         dy = material.dy
         dz = material.dz
@@ -277,17 +278,19 @@ cdef class CartesianRegularIntegrator(RegularGridIntegrator):
             iy = <int>(y / dy)  # Y-indices of grid cells, in which the points are located
             iz = <int>(z / dz)  # Z-indices of grid cells, in which the points are located
             if ix != ix_current or iy != iy_current or iz != iz_current:  # we moved to the next cell
-                if notempty_mv[ix_current, iy_current, iz_current]:  # checking if the cell contains non-zeros data
+                ivoxel = voxel_map_mv[ix_current, iy_current, iz_current]
+                if ivoxel > -1:  # checking if the cell contains non-zeros data
                     for i in range(bins):
-                        spectrum.samples_mv[ibin[i]] += ray_path * emission_mv[ix_current, iy_current, iz_current, ispec[i]]
+                        spectrum.samples_mv[ibin[i]] += ray_path * emission_mv[ivoxel, ispec[i]]
                 ix_current = ix
                 iy_current = iy
                 iz_current = iz
                 ray_path = 0  # zeroing ray's path along the cell
             ray_path += dt
-        if notempty_mv[ix_current, iy_current, iz_current]:
+        ivoxel = voxel_map_mv[ix_current, iy_current, iz_current]
+        if ivoxel > -1:
             for i in range(bins):
-                spectrum.samples_mv[ibin[i]] += ray_path * emission_mv[ix_current, iy_current, iz_current, ispec[i]]
+                spectrum.samples_mv[ibin[i]] += ray_path * emission_mv[ivoxel, ispec[i]]
 
         free(ibin)
         free(ispec)
@@ -298,32 +301,51 @@ cdef class RegularGridEmitter(InhomogeneousVolumeEmitter):
     """
     Basic class for the emitters defined on a regular grid.
 
-    :param np.ndarray emission: The 4D array containing the spectral emission
-        (in :math:`W/(sr m^3 nm)`) defined on a regular 3D grid.
-        The last dimension of this array is the spectral one.
-        The spectral resolution of the emission profile must be equal to
+    :param np.ndarray ~.emission: The 2D or 4D array containing the spectral emission
+        (in :math:`W/(sr\,m^3\,nm)`) defined on a regular 3D grid.
+        Spectral emission can be provided either for selected cells of the regular
+        grid (2D array) or for all grid cells (4D array).
+        If provided for selected cells, the 3D `voxel_map` array must be specified, which
+        maps 3D spatial grid to the `emission` array. Providing spectral emission
+        only for selected cells is less memory consuming if many grid cells have zero emission.
+        The last dimension of `emission` array is the spectral one.
+        Spectral resolution of the emission must be equal to
         `(camera.max_wavelength - camera.min_wavelength) / camera.spectral_bins`.
-        Some of the spectral bins can be skipped (e.g. if the material does not emit on
-        certain wavelengths of the specified wavelength range) with the help of the
-        `spectral_index` parameter  This allows to save memory.
-    :param np.ndarray spectral_index: The 1D array with
-        `spectral_index.size == emission.shape[3]`, which maps the spectral emission
-        array to the respective spectral bins.
+        For memory saving, the data can be provided for selected
+        spectral bins only (e.g. if the material does not emit on certain wavelengths of the
+        specified wavelength range). In this case, the 1D `spectral_map` array must be provided,
+        which maps each spectral slice of `emission` array to the respective spectral bin.
+        `RegularGridEmitter` stores spectral emission as a 2D array even if it was provided
+        in 4D. If `voxel_map` is not specified, all grid cells containing all-zero
+        spectra are deleted automatically. Similar to that, if `spectral_map` is not specified,
+        all spectral slices with zero emission anywhere on the spatial grid
+        are deleted.
     :param tuple grid_steps: The sizes of grid cells along each direction.
     :param double min_wavelength: The minimal wavelength which must be equal to
         `camera.min_wavelength`. This parameter is required to correctly process
         dispersive rendering.
+    :param np.ndarray spectral_map: The 1D array with
+        `spectral_map.size == emission.shape[-1]`, which maps the emission
+        array to the respective bins of spectral array specified in the camera
+        settings. If not provided, it is assumed that `emission` array contains the data
+        for all spectral bins of the spectral range. Defaults to `spectral_map=None`.
+    :param np.ndarray voxel_map: The 3D array containing for each grid cell the row index of
+        `emission` array (or -1 for the grid cells with zero emission or no data). This array maps
+        3D spatial grid to the `emission` array. This parameter is ignored if spectral emission is
+        provided as a 4D array. Defaults to `voxel_map=None`.
     :param raysect.optical.material.VolumeIntegrator integrator: Volume integrator,
         defaults to `integrator=NumericalIntegrator()`.
 
     :ivar tuple grid_shape: The shape of regular grid.
     :ivar tuple grid_steps: The sizes of grid cells along each direction.
-    :ivar np.ndarray emission: Spectral emission (in :math:`W/(sr m^3 nm)`) defined
-        on a regular 3D grid.
-    :ivar np.ndarray spectral_index: The 1D array, which maps the spectral emission
-        array to the respective spectral bins.
-    :ivar np.ndarray notempty: The 3D boolean array, which is True where `emission.sum(3)`
-        is non-zero.
+    :ivar np.ndarray ~.emission: 2D array of spectral emission (in :math:`W/(sr\,m^3\,nm)`)
+        defined on the cells of a regular 3D grid.
+    :ivar np.ndarray spectral_map: The 1D array, which maps the spectral emission
+        array to the respective spectral bins of spectral array specified in the camera
+        settings.
+    :ivar np.ndarray voxel_map: The 3D array containing for each grid cell the row index of
+        `emission` array (or -1 for the grid cells with zero emission or no data). This array
+        maps 3D spatial grid to the `emission` array.
     :ivar int min_wavelength: The minimal wavelength equal to `camera.min_wavelength`.
     """
 
@@ -332,16 +354,17 @@ cdef class RegularGridEmitter(InhomogeneousVolumeEmitter):
         double[3] _grid_steps
         double _min_wavelength
         int _n_spec
-        np.ndarray _emission, _spectral_index, _notempty
+        np.ndarray _emission, _spectral_map, _voxel_map
         public:
-            double[:, :, :, ::1] emission_mv
-            int[:] spectral_index_mv
-            uint8[:, :, ::1] notempty_mv
+            double[:, ::1] emission_mv
+            int[:] spectral_map_mv
+            int[:, :, ::1] voxel_map_mv
 
-    @cython.wraparound(False)
-    def __init__(self, np.ndarray emission, np.ndarray spectral_index, tuple grid_steps, double min_wavelength, VolumeIntegrator integrator=None):
+    def __init__(self, np.ndarray emission, tuple grid_steps, double min_wavelength,
+                 np.ndarray spectral_map=None, np.ndarray voxel_map=None, VolumeIntegrator integrator=None):
 
         cdef:
+            np.ndarray mask
             double step
 
         for step in grid_steps:
@@ -349,19 +372,38 @@ cdef class RegularGridEmitter(InhomogeneousVolumeEmitter):
                 raise ValueError('Grid steps must be > 0.')
         self._grid_steps = grid_steps
 
-        if emission.ndim != 4:
-            raise ValueError("Argument 'emission' must be a 4D array.")
-        if emission.shape[3] != spectral_index.size:
-            raise ValueError("The size of 'spectral_index' array must be equal to emission.shape[3].")
+        if emission.ndim == 2:
+            if voxel_map is None:
+                raise ValueError("If 'emission' is a 2D array, 'voxel_map' parameter must be provided.")
+            if voxel_map.ndim != 3:
+                raise ValueError("Argument 'voxel_map' must be a 3D array.")
+            if voxel_map.max() > emission.shape[0] - 1:
+                raise ValueError("Argument 'voxel_map' must not contain values higher than 'emission.shape[0] - 1'.")
+            self._voxel_map = voxel_map.astype(np.int32)
+            self._emission = emission
+        elif emission.ndim == 4:
+            self._voxel_map = -1 * np.ones((emission.shape[0], emission.shape[1], emission.shape[2]), dtype=np.int32)
+            mask = emission.sum(3) > 0
+            self._voxel_map[mask] = np.arange(mask.sum(), dtype=np.int32)
+            self._emission = emission[mask, :]
+        else:
+            raise ValueError("Argument 'emission' must be a 4D or 2D array.")
 
-        self._grid_shape = (emission.shape[0], emission.shape[1], emission.shape[2])
-        self._n_spec = emission.shape[3]
-        self._emission = emission
+        if spectral_map is None:
+            mask = self._emission.sum(0) > 0
+            self._spectral_map = np.arange(self._emission.shape[1], dtype=np.int32)[mask]
+            self._emission = self._emission[:, mask].copy(order='C')
+        else:
+            if self._emission.shape[1] != spectral_map.size:
+                raise ValueError("The size of 'spectral_map' array must be equal to emission.shape[-1].")
+            self._spectral_map = spectral_map.astype(np.int32)
+
+        self._grid_shape = self._voxel_map.shape
+        self._n_spec = self._emission.shape[1]
+
         self.emission_mv = self._emission
-        self._spectral_index = spectral_index.astype(np.int32)
-        self.spectral_index_mv = self._spectral_index
-        self._notempty = self._emission.sum(3).astype(np.bool)
-        self.notempty_mv = np.frombuffer(self._notempty, dtype=np.uint8).reshape(self.grid_shape)
+        self.voxel_map_mv = self._voxel_map
+        self.spectral_map_mv = self._spectral_map
 
         if min_wavelength <= 0:
             raise ValueError("Argument 'min_wavelength' must be > 0.")
@@ -375,19 +417,23 @@ cdef class RegularGridEmitter(InhomogeneousVolumeEmitter):
 
     @property
     def grid_steps(self):
-         return <tuple>self._grid_steps
+        return <tuple>self._grid_steps
+
+    @property
+    def n_spec(self):
+        return self._n_spec
 
     @property
     def min_wavelength(self):
         return self._min_wavelength
 
     @property
-    def spectral_index(self):
-        return self._spectral_index
+    def spectral_map(self):
+        return self._spectral_map
 
     @property
-    def notempty(self):
-        return self._notempty
+    def voxel_map(self):
+        return self._voxel_map
 
     @property
     def emission(self):
@@ -402,32 +448,51 @@ cdef class CylindricalRegularEmitter(RegularGridEmitter):
     or in `CylindricalRegularIntegrator`, so this emitter must be placed between a couple
     of coaxial cylinders that act like a bounding box.
 
-    :param np.ndarray emission: The 4D array containing the spectral emission
-        (in :math:`W/(sr m^3 nm)`) defined on a regular 3D grid in cylindrical coordinates:
-        :math:`(R, \phi, Z)` (in axisymmetric case `emission.shape[1] == 1`).
-        The last dimension of this array is the spectral one.
-        The spectral resolution of the emission profile must be equal to
+    :param np.ndarray ~.emission: The 2D or 4D array containing the spectral emission
+        (in :math:`W/(sr\,m^3\,nm)`) defined on a regular 3D grid in cylindrical coordinates:
+        :math:`(R, \phi, Z)` (if provided as a 4D array, in axisymmetric case
+        `emission.shape[1]` must be equal to 1).
+        Spectral emission can be provided either for selected cells of the regular
+        grid (2D array) or for all grid cells (4D array).
+        If provided for selected cells, the 3D `voxel_map` array must be specified, which
+        maps 3D spatial grid to the `emission` array. Providing spectral emission
+        only for selected cells is less memory consuming if many grid cells have zero emission.
+        The last dimension of `emission` array is the spectral one.
+        Spectral resolution of the emission must be equal to
         `(camera.max_wavelength - camera.min_wavelength) / camera.spectral_bins`.
-        Some of the spectral bins can be skipped (e.g. if the material does not emit on
-        certain wavelengths of the specified wavelength range) with the help of the
-        `spectral_index` parameter  This allows to save memory. which is
-        especially useful in a non-axisymmetric case.
-    :param np.ndarray spectral_index: The 1D array with the size equal to
-        `emission.shape[3]`, which maps the spectral emission array to the respective
-        spectral bins.
+        For memory saving, the data can be provided for selected
+        spectral bins only (e.g. if the material does not emit on certain wavelengths of the
+        specified wavelength range). In this case, the 1D `spectral_map` array must be provided,
+        which maps each spectral slice of `emission` array to the respective spectral bin.
+        `RegularGridEmitter` stores spectral emission as a 2D array even if it was provided
+        in 4D. If `voxel_map` is not specified, all grid cells containing all-zero
+        spectra are deleted automatically. Similar to that, if `spectral_map` is not specified,
+        all spectral slices with zero emission anywhere on the spatial grid
+        are deleted.
     :param tuple grid_steps: The sizes of grid cells in `R`, :math:`\phi` and `Z`
         directions. The size in :math:`\phi` must be provided in degrees (sizes in `R` and `Z`
         are provided in meters). The period in :math:`\phi` direction is defined as
-        `emission.shape[1] * grid_steps[1]`. Note that the period must be a multiple of 360.
+        `n_phi * grid_steps[1]`, where n_phi is the grid resolution in phi direction.
+        Note that the period must be a multiple of 360.
     :param double min_wavelength: The minimal wavelength which must be equal to
         `camera.min_wavelength`. This parameter is required to correctly process
         dispersive rendering.
+    :param np.ndarray spectral_map: The 1D array with
+        `spectral_map.size == emission.shape[-1]`, which maps the emission
+        array to the respective bins of spectral array specified in the camera
+        settings. If not provided, it is assumed that `emission` array contains the data
+        for all spectral bins of the spectral range. Defaults to `spectral_map=None`.
+    :param np.ndarray voxel_map: The 3D array containing for each grid cell the row index of
+        `emission` array (or -1 for the grid cells with zero emission or no data). This array maps
+        3D spatial grid to the `emission` array. In axisymmetric case `voxel_map.shape[1]` must be
+        equal to 1. This parameter is ignored if spectral emission is
+        provided as a 4D array. Defaults to `voxel_map=None`.
     :param raysect.optical.material.VolumeIntegrator integrator: Volume integrator, defaults to
         `CylindricalRegularIntegrator(step = 0.25 * min(grid_steps[0], grid_steps[2]))`.
     :param float rmin: Lower bound of grid in `R` direction (in meters), defaults to `rmin=0`.
 
     :ivar float period: The period in :math:`\phi` direction (equals to
-        `emission.shape[1] * grid_steps[1]`).
+        `n_phi * grid_steps[1]`, where n_phi is the grid resolution in phi direction).
     :ivar float rmin: Lower bound of grid in `R` direction.
     :ivar float dr: The size of grid cell in `R` direction (equals to `grid_steps[0]`).
     :ivar float dphi: The size of grid cell in :math:`\phi` direction (equals to `grid_steps[1]`).
@@ -462,17 +527,17 @@ cdef class CylindricalRegularEmitter(RegularGridEmitter):
         >>> emission = np.zeros((grid_shape[0], grid_shape[1], grid_shape[2], 2))
         >>> emission[:, :, :, 0] = emission_4574 / (4. * np.pi * delta_wavelength)  # W/(m^3 sr nm)
         >>> emission[:, :, :, 1] = emission_5272 / (4. * np.pi * delta_wavelength)
-        >>> # Defining wavelength range and creating spectral_index array
+        >>> # Defining wavelength range and creating spectral_map array
         >>> min_wavelength = 457.4 - 0.5 * delta_wavelength
-        >>> spectral_index = np.zeros(2, dtype=np.int32)
-        >>> spectral_index[1] = int((527.2 - min_wavelength) / delta_wavelength)
-        >>> spectral_bins = spectral_index[1] + 1
+        >>> spectral_map = np.zeros(2, dtype=np.int32)
+        >>> spectral_map[1] = int((527.2 - min_wavelength) / delta_wavelength)
+        >>> spectral_bins = spectral_map[1] + 1
         >>> max_wavelength = min_wavelength + spectral_bins * delta_wavelength
         >>> # Creating the scene
         >>> world = World()
         >>> pipeline = SpectralRadiancePipeline2D()
-        >>> material = CylindricalRegularEmitter(emission, spectral_index, grid_steps,
-                                                 min_wavelength, rmin=rmin)
+        >>> material = CylindricalRegularEmitter(emission, grid_steps, min_wavelength,
+                                                 spectral_map=spectral_map, rmin=rmin)
         >>> eps = 1.e-6  # ray must never leave the grid when passing through the volume
         >>> bounding_box = Subtract(Cylinder(rmax - eps, zmax - zmin - eps),
                                     Cylinder(rmin, zmax - zmin - eps),
@@ -485,22 +550,22 @@ cdef class CylindricalRegularEmitter(RegularGridEmitter):
         ...
         >>> # If reflections do not change the wavelength, the results for each spectral line
         >>> # can be obtained in W/(m^2 sr) in the following way.
-        >>> radiance_4574 = pipeline.frame.mean[:, :, spectral_index[0]] * delta_wavelength
-        >>> radiance_5272 = pipeline.frame.mean[:, :, spectral_index[1]] * delta_wavelength
+        >>> radiance_4574 = pipeline.frame.mean[:, :, spectral_map[0]] * delta_wavelength
+        >>> radiance_5272 = pipeline.frame.mean[:, :, spectral_map[1]] * delta_wavelength
 
     """
     cdef:
         double _dr, _dphi, _dz, _period, _rmin
 
-    def __init__(self, np.ndarray emission, np.ndarray spectral_index, tuple grid_steps, double min_wavelength,
-                 VolumeIntegrator integrator=None, double rmin=0):
+    def __init__(self, np.ndarray emission, tuple grid_steps, double min_wavelength,
+                 np.ndarray spectral_map=None, np.ndarray voxel_map=None, VolumeIntegrator integrator=None, double rmin=0):
 
         cdef:
             double def_integration_step, period
 
-        def_integration_step = 0.25 * min(grid_steps[0], grid_steps[-1])
+        def_integration_step = 0.25 * min(grid_steps[0], grid_steps[2])
         integrator = integrator or CylindricalRegularIntegrator(def_integration_step)
-        super().__init__(emission, spectral_index, grid_steps, min_wavelength, integrator=integrator)
+        super().__init__(emission, grid_steps, min_wavelength, spectral_map=spectral_map, voxel_map=voxel_map, integrator=integrator)
         self.rmin = rmin
         self._dr = self._grid_steps[0]
         self._dphi = self._grid_steps[1]
@@ -545,7 +610,7 @@ cdef class CylindricalRegularEmitter(RegularGridEmitter):
                                      AffineMatrix3D world_to_primitive, AffineMatrix3D primitive_to_world):
 
         cdef:
-            int ir, iphi, iz, ispec, ibin, ibin_start, ray_bins
+            int ivoxel, ir, iphi, iz, ispec, ibin, ibin_start, ray_bins
             double r, phi, delta_wavelength
 
         # In dispersive rendering, ray samples a small portion of the spectrum.
@@ -563,11 +628,12 @@ cdef class CylindricalRegularEmitter(RegularGridEmitter):
             phi = (180. / pi) * atan2(point.y, point.x)  # phi coordinates of the points (in the range [-180, 180))
             phi = (phi + 360) % self._period  # moving into the [0, period) sector (periodic emitter)
             iphi = <int>(phi / self._dphi)  # phi-index of grid cell, in which the point is located
-        if self.notempty_mv[ir, iphi, iz]:
+        ivoxel = self.voxel_map_mv[ir, iphi, iz]
+        if ivoxel > -1:
             for ispec in range(self._n_spec):
-                ibin = self.spectral_index_mv[ispec] - ibin_start
+                ibin = self.spectral_map_mv[ispec] - ibin_start
                 if -1 < ibin < ray_bins:
-                    spectrum.samples_mv[ibin] += self.emission_mv[ir, iphi, iz, ispec]
+                    spectrum.samples_mv[ibin] += self.emission_mv[ivoxel, ispec]
 
         return spectrum
 
@@ -578,22 +644,39 @@ cdef class CartesianRegularEmitter(RegularGridEmitter):
     Note that for performance reason there are no boundary checks in `emission_function()`,
     or in `CartesianRegularIntegrator`, so this emitter must be placed inside a bounding box.
 
-    :param np.ndarray emission: The 4D array containing the spectral emission
-        (in :math:`W/(sr m^3 nm)`) defined on a regular 3D grid in Cartesian coordinates.
-        The last dimension of this array is the spectral one.
-        The spectral resolution of the emission profile must be equal to
+    :param np.ndarray ~.emission: The 2D or 4D array containing the spectral emission
+        (in :math:`W/(sr\,m^3\,nm)`) defined on a regular 3D grid in Cartesian coordinates.
+        Spectral emission can be provided either for selected cells of the regular
+        grid (2D array) or for all grid cells (4D array).
+        If provided for selected cells, the 3D `voxel_map` array must be specified, which
+        maps 3D spatial grid to the `emission` array. Providing spectral emission
+        only for selected cells is less memory consuming if many grid cells have zero emission.
+        The last dimension of `emission` array is the spectral one.
+        Spectral resolution of the emission must be equal to
         `(camera.max_wavelength - camera.min_wavelength) / camera.spectral_bins`.
-        Some of the spectral bins can be skipped (e.g. if the material does not emit on
-        certain wavelengths of the specified wavelength range) with the help of the
-        `spectral_index` parameter  This allows to save memory.
-    :param np.ndarray spectral_index: The 1D array with the size equal to
-        `emission.shape[3]`, which maps the spectral emission array to the respective
-        spectral bins.
+        For memory saving, the data can be provided for selected
+        spectral bins only (e.g. if the material does not emit on certain wavelengths of the
+        specified wavelength range). In this case, the 1D `spectral_map` array must be provided,
+        which maps each spectral slice of `emission` array to the respective spectral bin.
+        `RegularGridEmitter` stores spectral emission as a 2D array even if it was provided
+        in 4D. If `voxel_map` is not specified, all grid cells containing all-zero
+        spectra are deleted automatically. Similar to that, if `spectral_map` is not specified,
+        all spectral slices with zero emission anywhere on the spatial grid
+        are deleted.
     :param tuple grid_steps: The sizes of grid cells in `X`, `Y` and `Z`
         directions in meters.
     :param double min_wavelength: The minimal wavelength which must be equal to
         `camera.min_wavelength`. This parameter is required to correctly process
         dispersive rendering.
+    :param np.ndarray spectral_map: The 1D array with
+        `spectral_map.size == emission.shape[-1]`, which maps the emission
+        array to the respective bins of spectral array specified in the camera
+        settings. If not provided, it is assumed that `emission` array contains the data
+        for all spectral bins of the spectral range. Defaults to `spectral_map=None`.
+    :param np.ndarray voxel_map: The 3D array containing for each grid cell the row index of
+        `emission` array (or -1 for the grid cells with zero emission or no data). This array maps
+        3D spatial grid to the `emission` array. This parameter is ignored if spectral emission is
+        provided as a 4D array. Defaults to `voxel_map=None`.
     :param raysect.optical.material.VolumeIntegrator integrator: Volume integrator, defaults to
         `CartesianRegularIntegrator(step = 0.25 * min(grid_steps))`.
 
@@ -628,16 +711,17 @@ cdef class CartesianRegularEmitter(RegularGridEmitter):
         >>> emission = np.zeros((grid_shape[0], grid_shape[1], grid_shape[2], 2))
         >>> emission[:, :, :, 0] = emission_4574 / (4. * np.pi * delta_wavelength)  # W/(m^3 sr nm)
         >>> emission[:, :, :, 1] = emission_5272 / (4. * np.pi * delta_wavelength)
-        >>> # Defining wavelength range and creating spectral_index array
+        >>> # Defining wavelength range and creating spectral_map array
         >>> min_wavelength = 457.4 - 0.5 * delta_wavelength
-        >>> spectral_index = np.zeros(2, dtype=np.int32)
-        >>> spectral_index[1] = int((527.2 - min_wavelength) / delta_wavelength)
-        >>> spectral_bins = spectral_index[1] + 1
+        >>> spectral_map = np.zeros(2, dtype=np.int32)
+        >>> spectral_map[1] = int((527.2 - min_wavelength) / delta_wavelength)
+        >>> spectral_bins = spectral_map[1] + 1
         >>> max_wavelength = min_wavelength + spectral_bins * delta_wavelength
         >>> # Creating the scene
         >>> world = World()
         >>> pipeline = SpectralRadiancePipeline2D()
-        >>> material = CartesianRegularEmitter(emission, spectral_index, grid_steps, min_wavelength)
+        >>> material = CartesianRegularEmitter(emission, grid_steps, min_wavelength,
+                                               spectral_map=spectral_map)
         >>> eps = 1.e-6  # ray must never leave the grid when passing through the volume
         >>> bounding_box = Box(lower=Point3D(0, 0, 0),
                                upper=Point3D(xmax-xmin-eps, ymax-ymin-eps, zmax-zmin-eps),
@@ -651,22 +735,23 @@ cdef class CartesianRegularEmitter(RegularGridEmitter):
         ...
         >>> # If reflections do not change the wavelength, the results for each spectral line
         >>> # can be obtained in W/(m^2 sr) in the following way.
-        >>> radiance_4574 = pipeline.frame.mean[:, :, spectral_index[0]] * delta_wavelength
-        >>> radiance_5272 = pipeline.frame.mean[:, :, spectral_index[1]] * delta_wavelength
+        >>> radiance_4574 = pipeline.frame.mean[:, :, spectral_map[0]] * delta_wavelength
+        >>> radiance_5272 = pipeline.frame.mean[:, :, spectral_map[1]] * delta_wavelength
 
     """
 
     cdef:
         double _dx, _dy, _dz
 
-    def __init__(self, np.ndarray emission, np.ndarray spectral_index, tuple grid_steps, double min_wavelength, VolumeIntegrator integrator=None):
+    def __init__(self, np.ndarray emission, tuple grid_steps, double min_wavelength,
+                 np.ndarray spectral_map=None, np.ndarray voxel_map=None, VolumeIntegrator integrator=None):
 
         cdef:
             double def_integration_step
 
         def_integration_step = 0.25 * min(grid_steps)
         integrator = integrator or CartesianRegularIntegrator(def_integration_step)
-        super().__init__(emission, spectral_index, grid_steps, min_wavelength, integrator=integrator)
+        super().__init__(emission, grid_steps, min_wavelength, spectral_map=spectral_map, voxel_map=voxel_map, integrator=integrator)
         self._dx = self._grid_steps[0]
         self._dy = self._grid_steps[1]
         self._dz = self._grid_steps[2]
@@ -692,7 +777,7 @@ cdef class CartesianRegularEmitter(RegularGridEmitter):
                                      AffineMatrix3D world_to_primitive, AffineMatrix3D primitive_to_world):
 
         cdef:
-            int isource, ix, iy, iz, ispec, ibin, ibin_start, ray_bins
+            int ivoxel, ix, iy, iz, ispec, ibin, ibin_start, ray_bins
             double delta_wavelength
 
         # In dispersive rendering, ray samples a small portion of the spectrum.
@@ -703,10 +788,11 @@ cdef class CartesianRegularEmitter(RegularGridEmitter):
         ix = <int>(point.x / self._dx)  # X-index of grid cell, in which the point is located
         iy = <int>(point.y / self._dy)  # Y-index of grid cell, in which the point is located
         iz = <int>(point.z / self._dz)  # Z-index of grid cell, in which the point is located
-        if self.notempty_mv[ix, iy, iz]:
+        ivoxel = self.voxel_map_mv[ix, iy, iz]
+        if ivoxel > -1:
             for ispec in range(self._n_spec):
-                ibin = self.spectral_index_mv[ispec] - ibin_start
+                ibin = self.spectral_map_mv[ispec] - ibin_start
                 if -1 < ibin < ray_bins:
-                    spectrum.samples_mv[ibin] += self.emission_mv[ix, iy, iz, ispec]
+                    spectrum.samples_mv[ibin] += self.emission_mv[ivoxel, ispec]
 
         return spectrum

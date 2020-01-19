@@ -58,11 +58,10 @@ wvl_range = min_wavelength - max_wavelength
 shift = 2 * (wavelengths - wvl_centre) / wvl_range + 5.
 radius = np.sqrt((x * x)[:, None] + (y * y)[None, :])
 emission = np.cos(shift[None, None, None, :] * radius[:, :, None, None] * np.ones(z.size)[None, None, :, None])**4
-spectral_index = np.arange(spectral_bins, dtype=np.int32)
 
 # scene
 world = World()
-emitter = RegularGridBox(emission, spectral_index, min_wavelength, xmax=xmax - xmin, ymax=ymax - ymin, zmax=zmax - zmin,
+emitter = RegularGridBox(emission, min_wavelength, xmax=xmax - xmin, ymax=ymax - ymin, zmax=zmax - zmin,
                          step=integration_step, parent=world, transform=translate(xmin, ymin + 1., zmin) * rotate(30, 0, 0))
 floor = Box(Point3D(-100, -0.1, -100), Point3D(100, 0, 100), world, material=RoughTitanium(0.1))
 
