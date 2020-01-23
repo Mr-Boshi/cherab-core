@@ -19,7 +19,7 @@
 # under the Licence.
 
 """
-Regular Grid Volumes accelerate integration through inhomogeneous emitting volume  
+Regular Grid Volumes accelerate integration through inhomogeneous emitting volume
 as they use pre-calculated values of spectral emissivity on a regular grid.
 
 Use `RegularGridBox` class for Cartesian grids and `RegularGridCylinder` class for cylindrical grids
@@ -72,32 +72,8 @@ class RegularGridVolume:
         self._primitive.transform = value
 
     @property
-    def step(self):
-        return self._primitive.material.integrator.step
-
-    @step.setter
-    def step(self, value):
-        self._primitive.material.integrator.step = value
-
-    @property
     def material(self):
         return self._primitive.material
-
-    @property
-    def min_wavelength(self):
-        return self._primitive.material.min_wavelength
-
-    @property
-    def spectral_map(self):
-        return self._primitive.material.spectral_map
-
-    @property
-    def emission(self):
-        return self._primitive.material.emission
-
-    @property
-    def voxel_map(self):
-        return self._primitive.material.voxel_map
 
 
 class RegularGridCylinder(RegularGridVolume):
@@ -204,29 +180,32 @@ class RegularGridCylinder(RegularGridVolume):
         >>> radiance_5272 = pipeline.frame.mean[:, :, spectral_map[1]] * delta_wavelength
     """
 
-    def __init__(self, emission, min_wavelength, radius_outer, height, radius_inner=0, period=360., spectral_map=None, voxel_map=None,
-                 step=None, parent=None, transform=None):
+    def __init__(self, emission, wavelengths, radius_outer, height, radius_inner=0, period=360., grid_shape=None,
+                 step=None, interpolate=True, extrapolate=True, parent=None, transform=None):
         if 360. % period > 1.e-3:
             raise ValueError("The period %.3f is not a multiple of 360." % period)
         if emission.ndim == 2:
-            if voxel_map is None:
-                raise ValueError("If 'emission' is a 2D array, 'voxel_map' parameter must be provided.")
-            if voxel_map.ndim != 3:
-                raise ValueError("Argument 'voxel_map' must be a 3D array.")
-            dr = (radius_outer - radius_inner) / voxel_map.shape[0]
-            dphi = period / voxel_map.shape[1]
-            dz = height / voxel_map.shape[2]
+            if grid_shape is None:
+                raise ValueError("If 'emission' is a 2D array, 'grid_shape' parameter must be specified.")
+            if len(grid_shape) != 3:
+                raise ValueError("Argument 'grid_shape' must contain 3 elements.")
+            if grid_shape[0] <= 0 or grid_shape[1] <= 0 or grid_shape[2] <= 0:
+                raise ValueError('Grid sizes must be > 0.')
+
         elif emission.ndim == 4:
-            dr = (radius_outer - radius_inner) / emission.shape[0]
-            dphi = period / emission.shape[1]
-            dz = height / emission.shape[2]
+            grid_shape = (emission.shape[0], emission.shape[1], emission.shape[2])
+
         else:
             raise ValueError("Argument 'emission' must be a 4D or 2D array.")
+
+        dr = (radius_outer - radius_inner) / grid_shape[0]
+        dphi = period / grid_shape[1]
+        dz = height / grid_shape[2]
         grid_steps = (dr, dphi, dz)
         eps_r = 1.e-5 * dr
         eps_z = 1.e-5 * dz
         step = step or 0.25 * min(dr, dz)
-        material = CylindricalRegularEmitter(emission, grid_steps, min_wavelength, spectral_map=spectral_map, voxel_map=voxel_map,
+        material = CylindricalRegularEmitter(grid_shape, grid_steps, emission, wavelengths, interpolate=interpolate, extrapolate=extrapolate,
                                              integrator=CylindricalRegularIntegrator(step), rmin=radius_inner)
         primitive = Subtract(Cylinder(radius_outer - eps_r, height - eps_z), Cylinder(radius_inner + eps_r, height - eps_z),
                              material=material, parent=parent, transform=transform)
@@ -327,28 +306,32 @@ class RegularGridBox(RegularGridVolume):
         >>> radiance_5272 = pipeline.frame.mean[:, :, spectral_map[1]] * delta_wavelength
     """
 
-    def __init__(self, emission, min_wavelength, xmax, ymax, zmax, spectral_map=None, voxel_map=None, step=None,
-                 parent=None, transform=None):
+    def __init__(self, emission, wavelengths, xmax, ymax, zmax, grid_shape=None, step=None,
+                 interpolate=True, extrapolate=True, parent=None, transform=None):
+
         if emission.ndim == 2:
-            if voxel_map is None:
-                raise ValueError("If 'emission' is a 2D array, 'voxel_map' parameter must be provided.")
-            if voxel_map.ndim != 3:
-                raise ValueError("Argument 'voxel_map' must be a 3D array.")
-            dx = xmax / voxel_map.shape[0]
-            dy = ymax / voxel_map.shape[1]
-            dz = zmax / voxel_map.shape[2]
+            if grid_shape is None:
+                raise ValueError("If 'emission' is a 2D array, 'grid_shape' parameter must be specified.")
+            if len(grid_shape) != 3:
+                raise ValueError("Argument 'grid_shape' must contain 3 elements.")
+            if grid_shape[0] <= 0 or grid_shape[1] <= 0 or grid_shape[2] <= 0:
+                raise ValueError('Grid sizes must be > 0.')
+
         elif emission.ndim == 4:
-            dx = xmax / emission.shape[0]
-            dy = ymax / emission.shape[1]
-            dz = zmax / emission.shape[2]
+            grid_shape = (emission.shape[0], emission.shape[1], emission.shape[2])
+
         else:
             raise ValueError("Argument 'emission' must be a 4D or 2D array.")
+
+        dx = xmax / grid_shape[0]
+        dy = ymax / grid_shape[1]
+        dz = zmax / grid_shape[2]
         grid_steps = (dx, dy, dz)
         eps_x = 1.e-5 * dx
         eps_y = 1.e-5 * dy
         eps_z = 1.e-5 * dz
         step = step or 0.25 * min(dx, dy, dz)
-        material = CartesianRegularEmitter(emission, grid_steps, min_wavelength, spectral_map=spectral_map, voxel_map=voxel_map,
+        material = CartesianRegularEmitter(grid_shape, grid_steps, emission, wavelengths, interpolate=interpolate, extrapolate=extrapolate,
                                            integrator=CartesianRegularIntegrator(step))
         primitive = Box(lower=Point3D(0, 0, 0), upper=Point3D(xmax - eps_x, ymax - eps_y, zmax - eps_z),
                         material=material, parent=parent, transform=transform)
