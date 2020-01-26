@@ -26,8 +26,8 @@ Use `RegularGridBox` class for Cartesian grids and `RegularGridCylinder` class f
 (3D or axisymmetrical).
 """
 
-from raysect.primitive import Cylinder, Subtract, Box
 from raysect.optical import Point3D
+from raysect.primitive import Cylinder, Subtract, Box
 from .regular_grid_emitters import CylindricalRegularIntegrator, CartesianRegularIntegrator
 from .regular_grid_emitters import CylindricalRegularEmitter, CartesianRegularEmitter
 
@@ -36,20 +36,10 @@ class RegularGridVolume:
     """
     Basic class for regular grid volumes.
 
-    :ivar np.ndarray ~.emission: 2D array of spectral emission (in :math:`W/(sr\,m^3\,nm)`)
-        defined on the cells of a regular 3D grid.
-    :ivar np.ndarray spectral_map: The 1D array, which maps the spectral emission
-        array to the respective spectral bins of spectral array specified in the camera
-        settings.
-    :ivar np.ndarray voxel_map: The 3D array containing for each grid cell the row index of
-        `emission` array (or -1 for the grid cells with zero emission or no data). This array
-        maps 3D spatial grid to the `emission` array.
-    :ivar int min_wavelength: The minimal wavelength equal to `camera.min_wavelength`.
     :ivar Node parent: Scene-graph parent node.
     :ivar AffineMatrix3D transform: An AffineMatrix3D defining the local co-ordinate system
         relative to the scene-graph parent.
-    :ivar RegularGridEmitter material: Regular grid emitter.
-    :ivar float step: Integration step of volume integrator.
+    :ivar RegularGridEmitter material: RegularGridEmitter material.
     """
 
     def __init__(self, primitive):
@@ -82,31 +72,21 @@ class RegularGridCylinder(RegularGridVolume):
     The emitter is periodic in :math:`\phi` direction.
     The base of the cylinder is located at `Z = 0` plane. Use `transform`
     parameter to move it.
-    
-    :param np.ndarray ~.emission: The 2D (row-major) or 4D array containing the spectral emission
-        (in :math:`W/(sr\,m^3\,nm)`) defined on a regular 3D grid in cylindrical coordinates:
-        :math:`(R, \phi, Z)` (if provided as a 4D array, in axisymmetric case
-        `emission.shape[1]` must be equal to 1).
+
+    :param object ~.emission: The 2D or 4D array or scipy sparse matrix containing the
+        emission defined on a regular :math:`(R, \phi, Z)` grid in :math:`W/(str\,m^3\,nm)`
+        (contineous spectrum) or in :math:`W/(str\,m^3)` (discrete spectrum).
         Spectral emission can be provided either for selected cells of the regular
-        grid (2D array) or for all grid cells (4D array).
-        If provided for selected cells, the 3D `voxel_map` array must be specified, which
-        maps 3D spatial grid to the `emission` array. Providing spectral emission
-        only for selected cells is less memory consuming if many grid cells have zero emission.
-        The last dimension of `emission` array is the spectral one.
-        Spectral resolution of the emission must be equal to
-        `(camera.max_wavelength - camera.min_wavelength) / camera.spectral_bins`.
-        For memory saving, the data can be provided for selected
-        spectral bins only (e.g. if the material does not emit on certain wavelengths of the
-        specified wavelength range). In this case, the 1D `spectral_map` array must be provided,
-        which maps each spectral slice of `emission` array to the respective spectral bin.
-        `RegularGridEmitter` stores spectral emission as a 2D array even if it was provided
-        in 4D. If `voxel_map` is not specified, all grid cells containing all-zero
-        spectra are deleted automatically. Similar to that, if `spectral_map` is not specified,
-        all spectral slices with zero emission anywhere on the spatial grid
-        are deleted.
-    :param double min_wavelength: The minimal wavelength which must be equal to
-        `camera.min_wavelength`. This parameter is required to correctly process
-        dispersive rendering.
+        grid (2D array or sparse matrix) or for all grid cells (4D array).
+        Note that if provided as a 2D array (or sparse matrix), the argument `grid_shape`
+        must be provided and the spatial index `(ir, iphi, iz)` must be flattened in a row-major
+        order: `iflat = grid_shape[1] * grid_shape[2] * ir + grid_shape[2] * iphi + iz`.
+        Regardless of the form in which the emission is provided, the last axis is the
+        spectral one.  The emission will be stored as a сompressed sparse column matrix
+        (`scipy.sparse.csc_matrix`). To reduce memory consumption, provide it as a `csc_matrix`.
+    :param ndarray wavelengths: The 1D array of wavelengths corresponding to the last axis of
+        provided emission array. The size of this array must be equal to `emission.shape[-1]`.
+        Initialisation will be faster if this array contains monotonically increasing values.
     :param float radius_outer: Radius of the outer cylinder and the upper bound of grid in
         `R` direction (in meters).
     :param float height: Height of the cylinder and the length of grid in `Z` direction
@@ -114,22 +94,66 @@ class RegularGridCylinder(RegularGridVolume):
     :param float radius_inner: Radius of the inner cylinder and the lower bound of grid in
         `R` direction (in meters), defaults to `radius_inner=0`.
     :param float period: A period in :math:`\phi` direction (in degree), defaults to `period=360`.
-    :param np.ndarray spectral_map: The 1D array with
-        `spectral_map.size == emission.shape[-1]`, which maps the emission
-        array to the respective bins of spectral array specified in the camera
-        settings. If not provided, it is assumed that `emission` array contains the data
-        for all spectral bins of the spectral range. Defaults to `spectral_map=None`.
-    :param np.ndarray voxel_map: The 3D array containing for each grid cell the row index of
-        `emission` array (or -1 for the grid cells with zero emission or no data). This array maps
-        3D spatial grid to the `emission` array. In axisymmetric case `voxel_map.shape[1]` must be
-        equal to 1. This parameter is ignored if spectral emission is
-        provided as a 4D array. Defaults to `voxel_map=None`.
+    :param tuple grid_shape: The number of grid cells along each direction,
+        defaults to `grid_shape=None`. Ignored if emission is a 4D array.
     :param float step: The step of integration along the ray (in meters), defaults to
         `0.25*min((radius_outer - radius_inner) / n_r, height / n_z)`, where n_r and n_z are
         the grid resolutions in `R` and `Z` directions.
+    :param bool contineous: Defines whether the emission is porvided as a contineous spectrum
+        (in :math:`W/(str\,m^3\,nm)`) or as a discrete spectrum (in :math:`W/(str\,m^3)`).
+        Defaults to `contineous=True`.
+    :param bool extrapolate: If True, the emission outside the provided spectral range
+        will be equal to the emission at the borders of this range (nearest-neighbour
+        extrapolation), otherwise it will be zero. Defaults to `extrapolate=True`.
+        This parameter is ignored if `contineous=False`.
     :param Node parent: Scene-graph parent node or None (default = None).
     :param AffineMatrix3D transform: An AffineMatrix3D defining the local co-ordinate system
         relative to the scene-graph parent (default = identity matrix).
+
+    :ivar Node parent: Scene-graph parent node.
+    :ivar AffineMatrix3D transform: An AffineMatrix3D defining the local co-ordinate system
+        relative to the scene-graph parent.
+    :ivar CylindricalRegularmitter material: CylindricalRegularEmitter material.
+
+    Continoues spectrum example:
+
+    .. code-block:: pycon
+
+        >>> import numpy as np
+        >>> from raysect.optical import World, translate, rotate
+        >>> from raysect.primitive import Cylinder, Subtract
+        >>> from cherab.tools.emitters import RegularGridCylinder
+        >>> ### Contineous case ###
+        >>> # grid parameters
+        >>> rmin = 0
+        >>> rmax = 2.
+        >>> zmin = -0.25
+        >>> zmax = 0.25
+        >>> r, dr = np.linspace(rmin, rmax, 201, retstep=True)
+        >>> r = r[:-1] + 0.5 * dr  # moving to the grid cell centers
+        >>> integration_step = 0.05
+        >>> # spectral emission profile
+        >>> min_wavelength = 375.
+        >>> max_wavelength = 740.
+        >>> wavelengths, delta_wavelength = np.linspace(min_wavelength, max_wavelength, 50,
+                                                        retstep=True)
+        >>> wvl_centre = 0.5 * (max_wavelength + min_wavelength)
+        >>> wvl_range = min_wavelength - max_wavelength
+        >>> shift = 2 * (wavelengths - wvl_centre) / wvl_range + 5.
+        >>> emission = np.cos(shift[None, None, None, :] * radius[:, None, None, None])**4
+        >>> # scene
+        >>> world = World()
+        >>> emitter = RegularGridCylinder(emission, wavelengths, radius_outer=rmax,
+                                          height=zmax - zmin, radius_inner=rmin,
+                                          period=phi_period, parent=world)
+        >>> emitter.material.transform = translate(-rmax, -rmax + 1., zmin) * rotate(30, 0, 0)
+        ...
+        >>> # if ray spectral properties do not change during the rendering,
+        >>> # build the cache before the first camera.observe() call to reduce memory consumptions
+        >>> emitter.material.cache_build(camera.min_wavelength, camera.max_wavelength,
+                                         camera.spectral_bins)
+
+    Discrete spectrum example:
 
     .. code-block:: pycon
 
@@ -140,10 +164,11 @@ class RegularGridCylinder(RegularGridVolume):
         >>> from cherab.tools.emitters import RegularGridCylinder
         >>> # Assume that the files 'Be_4574A.npy' and 'Be_527A.npy' contain the emissions
         >>> # (in W / m^3) of Be I (3d1 1D2 -> 2p1 1P1) and Be II (4s1 2S0.5 -> 3p1 2P2.5)
-        >>> # defined on a regular cylindrical grid: 3.5 m < R < 9 m,
+        >>> # spectral lines defined on a regular cylindrical grid: 3.5 m < R < 9 m,
         >>> # 0 < phi < 20 deg, -5 m < Z < 5 m, and periodic in phi direction.
         >>> emission_4574 = np.load('Be_4574A.npy')
-        >>> emission_5272 = np.load('Be_4574A.npy')
+        >>> emission_5272 = np.load('Be_5272A.npy')
+        >>> wavelengths = np.array([457.4, 527.2])
         >>> # Grid properties
         >>> rmin = 3.5
         >>> rmax = 9.
@@ -151,37 +176,35 @@ class RegularGridCylinder(RegularGridVolume):
         >>> zmin = -5.
         >>> zmax = 5.
         >>> grid_shape = emission_4574.shape
-        >>> # Defining wavelength step and converting to W/(m^3 sr nm)
-        >>> delta_wavelength = 5.  # 5 nm wavelength step
         >>> emission = np.zeros((grid_shape[0], grid_shape[1], grid_shape[2], 2))
-        >>> emission[:, :, :, 0] = emission_4574 / (4. * np.pi * delta_wavelength)  # W/(m^3 sr nm)
-        >>> emission[:, :, :, 1] = emission_5272 / (4. * np.pi * delta_wavelength)
-        >>> # Defining wavelength range and creating spectral_map array
-        >>> min_wavelength = 457.4 - 0.5 * delta_wavelength
-        >>> spectral_map = np.zeros(2, dtype=np.int32)
-        >>> spectral_map[1] = int((527.2 - min_wavelength) / delta_wavelength)
-        >>> spectral_bins = spectral_map[1] + 1
-        >>> max_wavelength = min_wavelength + spectral_bins * delta_wavelength
+        >>> emission[:, :, :, 0] = emission_4574 / (4. * np.pi)  # to W/(m^3 str)
+        >>> emission[:, :, :, 1] = emission_5272 / (4. * np.pi)
         >>> # Creating the scene
         >>> world = World()
         >>> pipeline = SpectralRadiancePipeline2D()
-        >>> rgc = RegularGridCylinder(emission, min_wavelength, radius_outer=rmax,
-                                      height=zmax - zmin, radius_inner=rmin, period=phi_period,
-                                      spectral_map=spectral_map,
-                                      parent=world, transform=translate(0, 0, zmin))
+        >>> emitter = RegularGridCylinder(emission, wavelengths, radius_outer=rmax,
+                                          height=zmax - zmin, radius_inner=rmin,
+                                          period=phi_period, parent=world,
+                                          transform = translate(0, 0, zmin),
+                                          contineous=False)
         ...
-        >>> camera.spectral_bins = spectral_bins
-        >>> camera.min_wavelength = min_wavelength
-        >>> camera.max_wavelength = max_wavelength
+        >>> camera.spectral_bins = 15
+        >>> camera.min_wavelength = 457.
+        >>> camera.max_wavelength = 528.
+        >>> delta_wavelength = (camera.max_wavelength - camera.min_wavelength)/camera.spectral_bins
+        >>> # if ray spectral properties do not change during the rendering,
+        >>> # build the cache before the first camera.observe() call to reduce memory consumptions
+        >>> emitter.material.cache_build(camera.min_wavelength, camera.max_wavelength,
+                                         camera.spectral_bins)
         ...
         >>> # If reflections do not change the wavelength, the results for each spectral line
-        >>> # can be obtained in W/(m^2 sr) in the following way.
-        >>> radiance_4574 = pipeline.frame.mean[:, :, spectral_map[0]] * delta_wavelength
-        >>> radiance_5272 = pipeline.frame.mean[:, :, spectral_map[1]] * delta_wavelength
+        >>> # can be obtained in W/(m^2 str) in the following way.
+        >>> radiance_4574 = pipeline.frame.mean[:, :, 0] * delta_wavelength
+        >>> radiance_5272 = pipeline.frame.mean[:, :, -1] * delta_wavelength
     """
 
     def __init__(self, emission, wavelengths, radius_outer, height, radius_inner=0, period=360., grid_shape=None,
-                 step=None, interpolate=True, extrapolate=True, parent=None, transform=None):
+                 step=None, contineous=True, extrapolate=True, parent=None, transform=None):
         if 360. % period > 1.e-3:
             raise ValueError("The period %.3f is not a multiple of 360." % period)
         if emission.ndim == 2:
@@ -202,12 +225,10 @@ class RegularGridCylinder(RegularGridVolume):
         dphi = period / grid_shape[1]
         dz = height / grid_shape[2]
         grid_steps = (dr, dphi, dz)
-        eps_r = 1.e-5 * dr
-        eps_z = 1.e-5 * dz
         step = step or 0.25 * min(dr, dz)
-        material = CylindricalRegularEmitter(grid_shape, grid_steps, emission, wavelengths, interpolate=interpolate, extrapolate=extrapolate,
+        material = CylindricalRegularEmitter(grid_shape, grid_steps, emission, wavelengths, contineous=contineous, extrapolate=extrapolate,
                                              integrator=CylindricalRegularIntegrator(step), rmin=radius_inner)
-        primitive = Subtract(Cylinder(radius_outer - eps_r, height - eps_z), Cylinder(radius_inner + eps_r, height - eps_z),
+        primitive = Subtract(Cylinder(radius_outer, height), Cylinder(radius_inner, height),
                              material=material, parent=parent, transform=transform)
         super().__init__(primitive)
 
@@ -217,46 +238,83 @@ class RegularGridBox(RegularGridVolume):
     Regular Grid Volume for rectangular emitter defined on a regular 3D :math:`(X, Y, Z)` grid.
     The grid starts at (0, 0, 0). Use `transform` parameter to move it.
 
-    :param np.ndarray ~.emission: The 2D (row-major) or 4D array containing the spectral emission
-        (in :math:`W/(sr\,m^3\,nm)`) defined on a regular 3D grid in Cartesian coordinates.
+    :param object ~.emission: The 2D or 4D array or scipy sparse matrix containing the
+        emission defined on a regular :math:`(X, Y, Z)` grid in :math:`W/(str\,m^3\,nm)`
+        (contineous spectrum) or in :math:`W/(str\,m^3)` (discrete spectrum).
         Spectral emission can be provided either for selected cells of the regular
-        grid (2D array) or for all grid cells (4D array).
-        If provided for selected cells, the 3D `voxel_map` array must be specified, which
-        maps 3D spatial grid to the `emission` array. Providing spectral emission
-        only for selected cells is less memory consuming if many grid cells have zero emission.
-        The last dimension of `emission` array is the spectral one.
-        Spectral resolution of the emission must be equal to
-        `(camera.max_wavelength - camera.min_wavelength) / camera.spectral_bins`.
-        For memory saving, the data can be provided for selected
-        spectral bins only (e.g. if the material does not emit on certain wavelengths of the
-        specified wavelength range). In this case, the 1D `spectral_map` array must be provided,
-        which maps each spectral slice of `emission` array to the respective spectral bin.
-        `RegularGridEmitter` stores spectral emission as a 2D array even if it was provided
-        in 4D. If `voxel_map` is not specified, all grid cells containing all-zero
-        spectra are deleted automatically. Similar to that, if `spectral_map` is not specified,
-        all spectral slices with zero emission anywhere on the spatial grid
-        are deleted.
-    :param double min_wavelength: The minimal wavelength which must be equal to
-        `camera.min_wavelength`. This parameter is required to correctly process
-        dispersive rendering.
+        grid (2D array or sparse matrix) or for all grid cells (4D array).
+        Note that if provided as a 2D array (or sparse matrix), the argument `grid_shape`
+        must be provided and the spatial index `(ix, iy, iz)` must be flattened in a row-major
+        order: `iflat = grid_shape[1] * grid_shape[2] * ix + grid_shape[2] * iy + iz`.
+        Regardless of the form in which the emission is provided, the last axis is the
+        spectral one.  The emission will be stored as a сompressed sparse column matrix
+        (`scipy.sparse.csc_matrix`). To reduce memory consumption, provide it as a `csc_matrix`.
+    :param ndarray wavelengths: The 1D array of wavelengths corresponding to the last axis of
+        provided emission array. The size of this array must be equal to `emission.shape[-1]`.
+        Initialisation will be faster if this array contains monotonically increasing values.
     :param float xmax: Upper bound of grid in `X` direction (in meters).
     :param float ymax: Upper bound of grid in `Y` direction (in meters).
     :param float zmax: Upper bound of grid in `Z` direction (in meters).
-    :param np.ndarray spectral_map: The 1D array with
-        `spectral_map.size == emission.shape[-1]`, which maps the emission
-        array to the respective bins of spectral array specified in the camera
-        settings. If not provided, it is assumed that `emission` array contains the data
-        for all spectral bins of the spectral range. Defaults to `spectral_map=None`.
-    :param np.ndarray voxel_map: The 3D array containing for each grid cell the row index of
-        `emission` array (or -1 for the grid cells with zero emission or no data). This array maps
-        3D spatial grid to the `emission` array. This parameter is ignored if spectral emission is
-        provided as a 4D array. Defaults to `voxel_map=None`.
+    :param tuple grid_shape: The number of grid cells along each direction,
+        defaults to `grid_shape=None`. Ignored if emission is a 4D array.
     :param float step: The step of integration along the ray (in meters), defaults to
         `step = 0.25 * min(xmax / n_x, ymax / n_y, zmax / n_z)`, where (n_x, n_y, n_z) is
         the grid resolution.
+    :param bool contineous: Defines whether the emission is porvided as a contineous spectrum
+        (in :math:`W/(str\,m^3\,nm)`) or as a discrete spectrum (in :math:`W/(str\,m^3)`).
+        Defaults to `contineous=True`.
+    :param bool extrapolate: If True, the emission outside the provided spectral range
+        will be equal to the emission at the borders of this range (nearest-neighbour
+        extrapolation), otherwise it will be zero. Defaults to `extrapolate=True`.
+        This parameter is ignored if `contineous=False`.
     :param Node parent: Scene-graph parent node or None (default = None).
     :param AffineMatrix3D transform: An AffineMatrix3D defining the local co-ordinate system
         relative to the scene-graph parent (default = identity matrix).
+
+    :ivar Node parent: Scene-graph parent node.
+    :ivar AffineMatrix3D transform: An AffineMatrix3D defining the local co-ordinate system
+        relative to the scene-graph parent.
+    :ivar CartesianRegularEmitter material: CartesianRegularEmitter material.
+
+    Continoues spectrum example:
+
+    .. code-block:: pycon
+
+        >>> import numpy as np
+        >>> from raysect.optical import World, translate, rotate
+        >>> from raysect.primitive import Cylinder, Subtract
+        >>> from cherab.tools.emitters import RegularGridBox
+        >>> # grid parameters
+        >>> xmin = ymin = -1.
+        >>> xmax = ymax = 1.
+        >>> zmin = -0.25
+        >>> zmax = 0.25
+        >>> x, dx = np.linspace(xmin, xmax, 101, retstep=True)
+        >>> y, dy = np.linspace(ymin, ymax, 101, retstep=True)
+        >>> x = x[:-1] + 0.5 * dx  # moving to the grid cell centers
+        >>> y = y[:-1] + 0.5 * dy
+        >>> # spectral emission profile
+        >>> min_wavelength = 375.
+        >>> max_wavelength = 740.
+        >>> wavelengths, delta_wavelength = np.linspace(min_wavelength, max_wavelength, 50,
+                                                        retstep=True)
+        >>> wvl_centre = 0.5 * (max_wavelength + min_wavelength)
+        >>> wvl_range = min_wavelength - max_wavelength
+        >>> shift = 2 * (wavelengths - wvl_centre) / wvl_range + 5.
+        >>> radius = np.sqrt((x * x)[:, None] + (y * y)[None, :])
+        >>> emission = np.cos(shift[None, None, None, :] * radius[:, :, None, None])**4
+        >>> # scene
+        >>> world = World()
+        >>> emitter = RegularGridBox(emission, wavelengths, xmax - xmin, ymax - ymin, zmax - zmin,
+                                     parent=world)
+        >>> emitter.material.transform = translate(xmin, ymin + 1., zmin) * rotate(30, 0, 0))
+        ...
+        >>> # if ray spectral properties do not change during the rendering,
+        >>> # build the cache before the first camera.observe() call to reduce memory consumptions
+        >>> emitter.material.cache_build(camera.min_wavelength, camera.max_wavelength,
+                                         camera.spectral_bins)
+
+    Discrete spectrum example:
 
     .. code-block:: pycon
 
@@ -264,50 +322,46 @@ class RegularGridBox(RegularGridVolume):
         >>> from raysect.optical import World, translate, Point3D
         >>> from raysect.primitive import Box
         >>> from raysect.optical.observer import SpectralRadiancePipeline2D
-        >>> from cherab.tools.emitters import RegularGridBox
+        >>> from cherab.tools.emitters import CartesianRegularEmitter
         >>> # Assume that the files 'Be_4574A.npy' and 'Be_527A.npy' contain the emissions
         >>> # (in W / m^3) of Be I (3d1 1D2 -> 2p1 1P1) and Be II (4s1 2S0.5 -> 3p1 2P2.5)
-        >>> # defined on a regular Cartesian grid: -3 m < X < 3 m,
+        >>> # spectral lines defined on a regular Cartesian grid: -3 m < X < 3 m,
         >>> # -3 m < Y < 3 m and -6 m < Z < 6 m.
         >>> emission_4574 = np.load('Be_4574A.npy')
-        >>> emission_5272 = np.load('Be_4574A.npy')
+        >>> emission_5272 = np.load('Be_5272A.npy')
         >>> # Grid properties
         >>> xmin = ymin = -3.
         >>> xmax = ymax = 3.
         >>> zmin = -6.
         >>> zmax = 6.
         >>> grid_shape = emission_4574.shape
-        >>> # Defining wavelength step and converting to W/(m^3 sr nm)
-        >>> delta_wavelength = 5.  # 5 nm wavelength step
         >>> emission = np.zeros((grid_shape[0], grid_shape[1], grid_shape[2], 2))
-        >>> emission[:, :, :, 0] = emission_4574 / (4. * np.pi * delta_wavelength)  # W/(m^3 sr nm)
-        >>> emission[:, :, :, 1] = emission_5272 / (4. * np.pi * delta_wavelength)
-        >>> # Defining wavelength range and creating spectral_map array
-        >>> min_wavelength = 457.4 - 0.5 * delta_wavelength
-        >>> spectral_map = np.zeros(2, dtype=np.int32)
-        >>> spectral_map[1] = int((527.2 - min_wavelength) / delta_wavelength)
-        >>> spectral_bins = spectral_map[1] + 1
-        >>> max_wavelength = min_wavelength + spectral_bins * delta_wavelength
+        >>> emission[:, :, :, 0] = emission_4574 / (4. * np.pi)  # to W/(m^3 str)
+        >>> emission[:, :, :, 1] = emission_5272 / (4. * np.pi)
         >>> # Creating the scene
         >>> world = World()
         >>> pipeline = SpectralRadiancePipeline2D()
-        >>> box = RegularGridBox(emission, min_wavelength,
-                                 xmax=xmax - xmin, ymax=ymax - ymin, zmax=zmax - zmin,
-                                 spectral_map=spectral_map,
-                                 parent=world, transform=translate(xmin, ymin, zmin))
+        >>> material = RegularGridBox(emission, wavelengths, xmax - xmin, ymax - ymin, zmax - zmin,
+                                      contineous=False, transform=translate(xmin, ymin, zmin),
+                                      parent=world)
         ...
-        >>> camera.spectral_bins = spectral_bins
-        >>> camera.min_wavelength = min_wavelength
-        >>> camera.max_wavelength = max_wavelength
+        >>> camera.spectral_bins = 15
+        >>> camera.min_wavelength = 457
+        >>> camera.max_wavelength = 528
+        >>> delta_wavelength = (camera.max_wavelength - camera.min_wavelength)/camera.spectral_bins
+        >>> # if ray spectral properties do not change during the rendering,
+        >>> # build the cache before the first camera.observe() call to reduce memory consumptions
+        >>> material.cache_build(camera.min_wavelength, camera.max_wavelength,
+                                 camera.spectral_bins)
         ...
         >>> # If reflections do not change the wavelength, the results for each spectral line
         >>> # can be obtained in W/(m^2 sr) in the following way.
-        >>> radiance_4574 = pipeline.frame.mean[:, :, spectral_map[0]] * delta_wavelength
-        >>> radiance_5272 = pipeline.frame.mean[:, :, spectral_map[1]] * delta_wavelength
+        >>> radiance_4574 = pipeline.frame.mean[:, :, 0] * delta_wavelength
+        >>> radiance_5272 = pipeline.frame.mean[:, :, -1] * delta_wavelength
     """
 
     def __init__(self, emission, wavelengths, xmax, ymax, zmax, grid_shape=None, step=None,
-                 interpolate=True, extrapolate=True, parent=None, transform=None):
+                 contineous=True, extrapolate=True, parent=None, transform=None):
 
         if emission.ndim == 2:
             if grid_shape is None:
@@ -327,12 +381,8 @@ class RegularGridBox(RegularGridVolume):
         dy = ymax / grid_shape[1]
         dz = zmax / grid_shape[2]
         grid_steps = (dx, dy, dz)
-        eps_x = 1.e-5 * dx
-        eps_y = 1.e-5 * dy
-        eps_z = 1.e-5 * dz
         step = step or 0.25 * min(dx, dy, dz)
-        material = CartesianRegularEmitter(grid_shape, grid_steps, emission, wavelengths, interpolate=interpolate, extrapolate=extrapolate,
-                                           integrator=CartesianRegularIntegrator(step))
-        primitive = Box(lower=Point3D(0, 0, 0), upper=Point3D(xmax - eps_x, ymax - eps_y, zmax - eps_z),
-                        material=material, parent=parent, transform=transform)
+        material = CartesianRegularEmitter(grid_shape, grid_steps, emission, wavelengths, contineous=contineous,
+                                           extrapolate=extrapolate, integrator=CartesianRegularIntegrator(step))
+        primitive = Box(lower=Point3D(0, 0, 0), upper=Point3D(xmax, ymax, zmax), material=material, parent=parent, transform=transform)
         super().__init__(primitive)
