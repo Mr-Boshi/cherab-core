@@ -17,8 +17,6 @@
 #
 # See the Licence for the specific language governing permissions and limitations
 # under the Licence.
-#
-# The following code is created by Vladislav Neverov (NRC "Kurchatov Institute") for Cherab Spectroscopy Modelling Framework
 
 from __future__ import print_function
 import os
@@ -35,7 +33,7 @@ else:
 
 class SartOpencl:
     """
-    A GPU-accelerated version of SART inversion.
+    A GPU-accelerated version of SART and SAART (adaptive SART) inversion.
     The geometry matrix and Laplacian matrix are provided on initialisation because they must
     be copied to GPU memory, which takes time. Inversions may be performed multiple times
     for different measurement vectors without copying the matrices each time. If required,
@@ -96,7 +94,7 @@ class SartOpencl:
         self.cl_context = cl.Context([device])
 
         # reading and compiling OpenCL kernels
-        kernels_filename = 'sart_kernels_atomic.cl' if use_atomic else 'sart_kernels.cl'
+        kernels_filename = 'sart_kernels_atomic.cl' if self.use_atomic else 'sart_kernels.cl'
         kernel_source_file = os.path.join(os.path.dirname(os.path.realpath(__file__)), kernels_filename)
         with open(kernel_source_file) as f_kernel:
             kernel_source = f_kernel.read()
@@ -123,6 +121,7 @@ class SartOpencl:
         grad_penalty = np.zeros(self.n_sources, dtype=np.float32)
         self.grad_penalty_device = cl.Buffer(self.cl_context, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=grad_penalty)
         self.solution_device = cl.Buffer(self.cl_context, mf.READ_WRITE, cell_ray_densities.nbytes)
+        self.old_solution_device = cl.Buffer(self.cl_context, mf.READ_ONLY, cell_ray_densities.nbytes) if self.use_atomic else None
         self.detectors_device = cl.Buffer(self.cl_context, mf.READ_ONLY, ray_lengths.nbytes)
         self.y_hat_device = cl.Buffer(self.cl_context, mf.READ_WRITE, ray_lengths.nbytes)
 
@@ -162,6 +161,8 @@ class SartOpencl:
         self.cell_ray_densities_device.release()
         self.ray_lengths_device.release()
         self.solution_device.release()
+        if self.old_solution_device is not None:
+            self.old_solution_device.release()
         self.grad_penalty_device.release()
         self.detectors_device.release()
         self.y_hat_device.release()
@@ -185,7 +186,7 @@ class SartOpencl:
             cl.enqueue_copy(queue, self.laplacian_matrix_device, laplacian_matrix)
 
     def __call__(self, measurement_vector, initial_guess=None, max_iterations=250, relaxation=1.0,
-                 beta_laplace=0.01, conv_tol=1.e-4, time_limit=None):
+                 adaptive=False, beta_laplace=0.01, conv_tol=1.e-4, time_limit=None):
         """
         Performs the inversion for a given measurement vector.
 
@@ -195,6 +196,8 @@ class SartOpencl:
             or a constant value that will be used to seed the algorithm.
         :param int max_iterations: The maximum number of iterations to run the SART algorithm
             before returning a result, defaults to `max_iterations=250`.
+        :param bool adaptive: Use adaptive SART (SAART) method. Note that daptive weights are
+            used only from the second iteration step.
         :param float relaxation: The relaxation hyperparameter, defaults to `relaxation=1`.
             Consult the reference papers for more information on this hyperparameter.
         :param float beta_laplace: The regularisation hyperparameter in the range [0, 1].
@@ -213,13 +216,16 @@ class SartOpencl:
         """
         time_start = timer()
         time_limit = time_limit or 1.e7
+
+        measurement_max = measurement_vector.max()
+
         if initial_guess is None:
             solution = np.zeros(self.n_sources, dtype=np.float32) + 1 / np.e
         elif isinstance(initial_guess, (float, int)):
-            solution = np.zeros(self.n_sources, dtype=np.float32) + initial_guess
+            solution = np.zeros(self.n_sources, dtype=np.float32) + initial_guess / measurement_max
         else:
-            solution = initial_guess.astype(np.float32)  # making a copy even if initial_guess is in float32 already
-        measurement_max = measurement_vector.max()
+            solution = initial_guess.astype(np.float32) / measurement_max  # making a copy even if initial_guess is in float32 already
+
         # normalising and converting to float32
         measurement_vector = (measurement_vector / measurement_max).astype(np.float32)
         measurement_squared = np.dot(measurement_vector, measurement_vector)
@@ -240,7 +246,13 @@ class SartOpencl:
         for k in range(max_iterations):
             # print('Iteration: %d' % k)
             # making one iteration on device
-            self._make_iteration(queue, relaxation, beta_laplace)
+            self._make_iteration(queue, relaxation, beta_laplace, adaptive * bool(k))  # adaptive weights are used from the 2nd step
+
+            if self.use_atomic and adaptive:
+                # In SAART, the solution is used to calculate adaptive weight.
+                # If atomic operations are used, the solution is updated asynchroniously,
+                # so a separate read-only copy of the solution is required.
+                cl.enqueue_copy(queue, self.old_solution_device, self.solution_device)
 
             # calculating y_hat on device
             self._calc_y_hat(queue)
@@ -283,7 +295,7 @@ class SartOpencl:
                                                 self.geometry_matric_col_maj_device, self.solution_device, self.y_hat_device,
                                                 np.uint32(self.m_detectors), np.uint32(self.n_sources))
 
-    def _make_iteration(self, queue, relaxation, beta_laplace):
+    def _make_iteration(self, queue, relaxation, beta_laplace, adaptive=False):
         if self.laplacian_matrix_device is not None:
             if self.use_atomic:
                 self.cl_prog.zero_all(queue, self.global_work_size['trivial_sources'], self.local_work_size['default'],
@@ -294,10 +306,22 @@ class SartOpencl:
             self.cl_prog.vec_scalar_mult(queue, self.global_work_size['trivial_sources'], self.local_work_size['default'],
                                          self.grad_penalty_device, np.float32(beta_laplace), np.uint32(self.n_sources))
         # grad_penalty is just an all-zero array if laplacian_matrix is not provided on initialisation
-        self.cl_prog.sart_iteration(queue, self.global_work_size['iter'], self.local_work_size['default'],
-                                    self.geometry_matrix_device, self.cell_ray_densities_device, self.ray_lengths_device,
-                                    self.y_hat_device, self.detectors_device, self.solution_device, self.grad_penalty_device,
-                                    np.float32(relaxation), np.uint32(self.n_sources), np.uint32(self.m_detectors))
+        if adaptive:
+            if self.use_atomic:
+                self.cl_prog.saart_iteration(queue, self.global_work_size['iter'], self.local_work_size['default'],
+                                             self.geometry_matrix_device, self.cell_ray_densities_device, self.y_hat_device,
+                                             self.detectors_device, self.solution_device, self.old_solution_device, self.grad_penalty_device,
+                                             np.float32(relaxation), np.uint32(self.n_sources), np.uint32(self.m_detectors))
+            else:
+                self.cl_prog.saart_iteration(queue, self.global_work_size['iter'], self.local_work_size['default'],
+                                             self.geometry_matrix_device, self.cell_ray_densities_device,
+                                             self.y_hat_device, self.detectors_device, self.solution_device, self.grad_penalty_device,
+                                             np.float32(relaxation), np.uint32(self.n_sources), np.uint32(self.m_detectors))
+        else:
+            self.cl_prog.sart_iteration(queue, self.global_work_size['iter'], self.local_work_size['default'],
+                                        self.geometry_matrix_device, self.cell_ray_densities_device, self.ray_lengths_device,
+                                        self.y_hat_device, self.detectors_device, self.solution_device, self.grad_penalty_device,
+                                        np.float32(relaxation), np.uint32(self.n_sources), np.uint32(self.m_detectors))
         if self.use_atomic:
             self.cl_prog.zero_negative(queue, self.global_work_size['trivial_sources'], self.local_work_size['default'],
                                        self.solution_device, np.uint32(self.n_sources))

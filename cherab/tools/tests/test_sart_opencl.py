@@ -54,10 +54,22 @@ class TestSartOpencl(unittest.TestCase):
             solution, residual = inv_sart(self.receiver)
         self.assertTrue(np.allclose(solution, self.true_emissivity, atol=1.e-2))
 
+    def test_adaptive_inversion(self):
+        with SartOpencl(self.gm, block_size=256, copy_column_major=True, use_atomic=False,
+                        steps_per_thread=64, block_size_row_maj=64) as inv_sart:
+            solution, residual = inv_sart(self.receiver, adaptive=True, conv_tol=1.e-6)
+        self.assertTrue(np.allclose(solution, self.true_emissivity, atol=1.e-2))
+
     def test_inversion_atomic(self):
         with SartOpencl(self.gm, block_size=256, copy_column_major=True, use_atomic=True,
                         steps_per_thread=64, block_size_row_maj=64) as inv_sart:
             solution, residual = inv_sart(self.receiver)
+        self.assertTrue(np.allclose(solution, self.true_emissivity, atol=1.e-2))
+
+    def test_adaptive_inversion_atomic(self):
+        with SartOpencl(self.gm, block_size=256, copy_column_major=True, use_atomic=True,
+                        steps_per_thread=64, block_size_row_maj=64) as inv_sart:
+            solution, residual = inv_sart(self.receiver, adaptive=True, conv_tol=1.e-6)
         self.assertTrue(np.allclose(solution, self.true_emissivity, atol=1.e-2))
 
     def test_inversion_constrained(self):

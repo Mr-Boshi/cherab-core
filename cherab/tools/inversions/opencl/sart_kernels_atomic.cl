@@ -15,8 +15,6 @@
 //
 // See the Licence for the specific language governing permissions and limitations
 // under the Licence.
-//
-// The following code is created by Vladislav Neverov (NRC "Kurchatov Institute") for Cherab Spectroscopy Modelling Framework
 
 #ifndef BLOCK_SIZE
 #define BLOCK_SIZE 256
@@ -142,7 +140,6 @@ __kernel void sart_iteration(__global float * const restrict geometry_matrix, __
     const unsigned int isource = get_group_id(0) * BLOCK_SIZE + tid;
     const unsigned int idet_first = get_group_id(1) * STEPS_PER_THREAD;
     const float cell_ray_density = (isource < n_sources) ? cell_ray_densities[isource] : 0;
-    __local float inv_ray_lengths[STEPS_PER_THREAD];
     __local float diff_det[STEPS_PER_THREAD];
     float obs_diff = 0;
     unsigned int idet_block_max = m_detectors - idet_first;
@@ -150,27 +147,72 @@ __kernel void sart_iteration(__global float * const restrict geometry_matrix, __
     barrier(CLK_LOCAL_MEM_FENCE);
     if (tid < idet_block_max) {
         const unsigned int idet = idet_first + tid;
-        inv_ray_lengths[tid] = ray_lengths[idet];
-        if (inv_ray_lengths[tid] > ZERO_CUT) inv_ray_lengths[tid] = 1.f / inv_ray_lengths[tid]; // inverting ray lengths if possible
-        diff_det[tid] = detectors[idet] - y_hat[idet];
+        float inv_ray_lengths = ray_lengths[idet];
+        if (inv_ray_lengths > ZERO_CUT) inv_ray_lengths = 1.f / inv_ray_lengths; // inverting ray lengths if possible
+        diff_det[tid] = inv_ray_lengths * (detectors[idet] - y_hat[idet]);
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     if (cell_ray_density > ZERO_CUT) {
        if (!(idet_block_max % 4)) { // unroll 4 if possible
             for (unsigned int idet_block = 0; idet_block < idet_block_max; idet_block += 4){
                 const unsigned int idet_base = idet_first + idet_block;
-                obs_diff += geometry_matrix[idet_base       * n_sources + isource] * inv_ray_lengths[idet_block]     * diff_det[idet_block] + \
-                            geometry_matrix[(idet_base + 1) * n_sources + isource] * inv_ray_lengths[idet_block + 1] * diff_det[idet_block + 1] + \
-                            geometry_matrix[(idet_base + 2) * n_sources + isource] * inv_ray_lengths[idet_block + 2] * diff_det[idet_block + 2] + \
-                            geometry_matrix[(idet_base + 3) * n_sources + isource] * inv_ray_lengths[idet_block + 3] * diff_det[idet_block + 3];
+                obs_diff += geometry_matrix[idet_base       * n_sources + isource] * diff_det[idet_block] + \
+                            geometry_matrix[(idet_base + 1) * n_sources + isource] * diff_det[idet_block + 1] + \
+                            geometry_matrix[(idet_base + 2) * n_sources + isource] * diff_det[idet_block + 2] + \
+                            geometry_matrix[(idet_base + 3) * n_sources + isource] * diff_det[idet_block + 3];
             }
         }
         else {
             for (unsigned int idet_block = 0; idet_block < idet_block_max; idet_block += 1){
-                obs_diff += geometry_matrix[(idet_first + idet_block) * n_sources + isource] * inv_ray_lengths[idet_block] * diff_det[idet_block];
+                obs_diff += geometry_matrix[(idet_first + idet_block) * n_sources + isource] * diff_det[idet_block];
             }
         }
         const float solution_add = (obs_diff * relaxation) / (cell_ray_density + ZERO_CUT);
+        if (!get_group_id(1)) atomicAdd_g_f(&solution[isource], solution_add - grad_penalty[isource]);
+        else atomicAdd_g_f(&solution[isource], solution_add);
+        
+    }
+	else if ((isource < n_sources) && (!get_group_id(1))) atomicAdd_g_f(&solution[isource], -grad_penalty[isource]);
+}
+
+
+__kernel void saart_iteration(__global float * const restrict geometry_matrix, __global float * const restrict cell_ray_densities, \
+                              __global float * const restrict y_hat, __global float * const restrict detectors, \
+                              __global float * const restrict solution, __global float * const restrict solution_old, \
+                              __global float * const restrict grad_penalty, \
+                              const float relaxation, const unsigned int n_sources, const unsigned int m_detectors){
+    const unsigned int tid = get_local_id(0);
+    const unsigned int isource = get_group_id(0) * BLOCK_SIZE + tid;
+    const unsigned int idet_first = get_group_id(1) * STEPS_PER_THREAD;
+    const float sol_old = solution_old[isource];
+    const float cell_ray_density = (isource < n_sources) ? cell_ray_densities[isource] : 0;
+    __local float diff_det[STEPS_PER_THREAD];
+    float obs_diff = 0;
+    unsigned int idet_block_max = m_detectors - idet_first;
+    if (idet_block_max > STEPS_PER_THREAD) idet_block_max = STEPS_PER_THREAD;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (tid < idet_block_max) {
+        const unsigned int idet = idet_first + tid;
+        const float y_hat_local = y_hat[idet];
+        diff_det[tid] = (y_hat_local > ZERO_CUT) ? (detectors[idet] - y_hat_local) / y_hat_local : 0;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (cell_ray_density > ZERO_CUT) {
+       if (!(idet_block_max % 4)) { // unroll 4 if possible
+            for (unsigned int idet_block = 0; idet_block < idet_block_max; idet_block += 4){
+                const unsigned int idet_base = idet_first + idet_block;
+                obs_diff += geometry_matrix[idet_base       * n_sources + isource] * diff_det[idet_block] + \
+                            geometry_matrix[(idet_base + 1) * n_sources + isource] * diff_det[idet_block + 1] + \
+                            geometry_matrix[(idet_base + 2) * n_sources + isource] * diff_det[idet_block + 2] + \
+                            geometry_matrix[(idet_base + 3) * n_sources + isource] * diff_det[idet_block + 3];
+            }
+        }
+        else {
+            for (unsigned int idet_block = 0; idet_block < idet_block_max; idet_block += 1){
+                obs_diff += geometry_matrix[(idet_first + idet_block) * n_sources + isource] * diff_det[idet_block];
+            }
+        }
+        const float solution_add = (sol_old * obs_diff * relaxation) / (cell_ray_density + ZERO_CUT);
         if (!get_group_id(1)) atomicAdd_g_f(&solution[isource], solution_add - grad_penalty[isource]);
         else atomicAdd_g_f(&solution[isource], solution_add);
         

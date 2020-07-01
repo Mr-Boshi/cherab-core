@@ -300,3 +300,271 @@ cpdef invert_constrained_sart(geometry_matrix, laplacian_matrix, measurement_vec
                 break
 
     return solution, convergence
+
+
+@cython.boundscheck(False)
+cpdef invert_saart(geometry_matrix, measurement_vector, object initial_guess=None, int max_iterations=250,
+                   double relaxation=1.0, double conv_tol=1.0E-4):
+    """
+    Performs a SAART (adaptive SART) inversion on the specified measurement vector.
+    
+    This function implements the Simultaneous Adaptive Algebraic Reconstruction Technique (SAART), as published in
+    W. Lu and F.-F. Yin, Med. Phys. 31, 3222–3230 (2004). The SAART method is an iterative inversion 
+    scheme where the source cells are updated with the formula
+
+    .. math::
+
+       x_l^{(i+1)} = f_{sart}(x_l^{(i)}) = x_l^{(i)} + \\frac{\omega}{W_{\oplus,l}} \sum_{k=1}^{N_d} \\frac{W_{k,l} x_l^{(i)}}{\hat{\Phi}_k} (\Phi_k - \hat{\Phi}_k),
+
+    where
+    
+    .. math::
+       W_{\oplus, l} = \sum_{k=1}^{N_d} W_{k,l}.
+
+    Here :math:`x_l^{(i)}` is the previous estimate for the emission at voxel :math:`l` in iteration :math:`i`.
+    The SAART method effectively updates each cell by the weighted average error between the forward modelled
+    :math:`\hat{\Phi}_k` and observed :math:`\Phi_k` measurements. SAART emphasizes the contribution of
+    emission in cell j in pixel i of the synthetic camera image by applying the weighing factor
+    :math:`frac{W_{k,l} x_l^{(i)}}{\hat{\Phi}_k}`, while SART weighs the cells strictly according to
+    the camera viewing geometry by :math:`frac{W_{k,l}}{\sum_{l=1}^{N_s} W_{k,l}}`. This modification improves
+    the localization of the emission in the tomographic reconstructions by reducing the smoothing of
+    the emission along the camera sight lines (see J. Karhunen et al, Rev. Sci. Instrum. 90, 103504 (2019)
+    for more details). SAART does not update the zero components of the solution vector, therefore, for safety,
+    the first iteration step is always performed using the SART method, and adaptive weights are used only
+    from the second step.
+    
+    :param np.ndarray geometry_matrix: The sensitivity matrix describing the coupling between the detectors
+      and the voxels. Must be an array with shape :math:`(N_d, N_s)`.
+    :param np.ndarray measurement_vector: The measured power/radiance vector with shape :math:`(N_d)`. 
+    :param initial_guess: An optional initial guess, can be an array of shape :math:`(N_s)` or a constant
+      value that will be used to seed the algorithm.
+    :param int max_iterations: The maximum number of iterations to run the SART algorithm before returning
+      a result, defaults to `max_iterations=250`.
+    :param float relaxation: The relaxation hyperparameter, defaults to `relaxation=1`. Consult the reference
+      papers for more information on this hyperparameter.
+    :param float conv_tol: The convergence limit at which the algorithm will be terminated, unless the maximum
+      number of iterations has been reached. The convergence is calculated as the normalised squared difference
+      between the measurement and solution vectors.
+    :return: A tuple with the inverted solution vector :math:`\mathbf{x}` as an ndarray with shape :math:`(N_s)`,
+      and the convergence achieved as a float.
+    
+    .. code-block:: pycon
+   
+       >>> from cherab.tools.inversions import invert_saart
+       >>> inverted_solution, conv = invert_saart(weight_matrix, observations, max_iterations=100)    
+    """
+
+    cdef:
+        int m_observations, n_sources, ith_obs, jth_cell, k
+        list convergence
+        double x_j, x_j_new, relax_over_density, obs_diff, measurement_squared, y_hat_squared, adaptive_weight
+        np.ndarray solution, solution_new, y_hat_vector, cell_ray_densities
+        double[:] obs_vector_mv, solution_mv, solution_new_mv, y_hat_vector_mv, cell_ray_densities_mv, inv_y_hat_mv
+        double[:, :] geometry_matrix_mv
+
+    m_observations, n_sources = geometry_matrix.shape  # (M, N) matrix
+
+    # Performing 1st iteration step using SART
+    solution, convergence = invert_sart(geometry_matrix, measurement_vector, initial_guess=initial_guess,
+                                        max_iterations=1, relaxation=relaxation, conv_tol=conv_tol)
+
+    solution_mv = solution
+
+    solution_new = np.zeros(n_sources)
+    solution_new_mv = solution_new
+
+    obs_vector_mv = measurement_vector
+    geometry_matrix_mv = geometry_matrix
+
+    # A_(+,j)  - the total length of all rays passing through jth cell, equivalent to ray density
+    cell_ray_densities = np.sum(geometry_matrix, axis=0)
+    cell_ray_densities_mv = cell_ray_densities
+
+    y_hat_vector = np.dot(geometry_matrix, solution)
+    y_hat_vector_mv = y_hat_vector
+    inv_y_hat_mv = 1 / y_hat_vector
+
+    for k in range(1, max_iterations):
+
+        for jth_cell in range(n_sources):
+
+            x_j = solution_mv[jth_cell]  # previous solution value for this cell
+
+            if cell_ray_densities_mv[jth_cell] > 0.0:
+
+                with cython.cdivision(True):
+                    relax_over_density = relaxation / cell_ray_densities_mv[jth_cell]
+                obs_diff = 0
+                for ith_obs in range(m_observations):
+                    if y_hat_vector_mv[ith_obs] == 0:
+                        continue
+                    adaptive_weight = geometry_matrix_mv[ith_obs, jth_cell] * x_j * inv_y_hat_mv[ith_obs]
+                    obs_diff += adaptive_weight * (obs_vector_mv[ith_obs] - y_hat_vector_mv[ith_obs])
+
+                x_j_new = x_j + relax_over_density * obs_diff
+
+            # It is possible that some cells will have no rays passing through them.
+            else:
+                x_j_new = x_j
+
+            # Don't allow negativity
+            if x_j_new < 0:
+                x_j_new = 0.0
+
+            solution_new_mv[jth_cell] = x_j_new
+
+        # Calculate how quickly the code is converging
+
+        y_hat_vector = np.dot(geometry_matrix, solution_new)
+        y_hat_vector_mv = y_hat_vector
+
+        measurement_squared = np.dot(measurement_vector, measurement_vector)
+        y_hat_squared = np.dot(y_hat_vector, y_hat_vector)
+        convergence.append((measurement_squared - y_hat_squared) / measurement_squared)
+
+        # Set the new solution to be the old solution and get ready to repeat
+        solution_mv[:] = solution_new_mv[:]
+
+        # Check for convergence
+        if np.abs(convergence[k] - convergence[k - 1]) < conv_tol:
+            break
+
+    return solution, convergence
+
+
+@cython.boundscheck(False)
+cpdef invert_constrained_saart(geometry_matrix, laplacian_matrix, measurement_vector,
+                               object initial_guess=None, int max_iterations=250, double relaxation=1.0,
+                               double beta_laplace=0.01, double conv_tol=1.0E-4):
+    """
+
+    Performs a constrained SAART (adaptive SART) inversion on the specified measurement vector.
+    
+    The core of the constrained SAART algorithm is identical to the basic SAART algorithm implemented in 
+    `invert_saart()`. The only difference is that now the iterative update formula includes a 
+    regularisation operator.
+
+    .. math::
+
+       x_l^{(i+1)} = f_{saart}(x_l^{(i)}) - \hat{\mathcal{L}}_{iso}(x_l^{(i)}).
+
+    In this particular function we have implemented a isotropic Laplacian smoothness operator, 
+    
+    .. math::
+
+       \hat{\mathcal{L}}_{iso}(x_l^{(i)}) = \\beta_L (Cx_l^{(i)} - \sum_{c=1}^C x_c^{(i)}).
+
+    Here, :math:`c` is the index for the sum over the neighbouring voxels. The regularisation 
+    hyperparameter :math:`\\beta_L` determines the amount of local smoothness imposed on the
+    solution vector. When :math:`\\beta_L = 0`, the solution is fully determined by the 
+    measurements, and as :math:`\\beta_L \\rightarrow 1`, the solution is dominated by the 
+    smoothness operator.
+
+    Just like in `invert_saart()`, the first iteration step is performed using the constrained
+    SART method, and adaptive weights are used only from the second step.
+    
+    :param np.ndarray geometry_matrix: The sensitivity matrix describing the coupling between the detectors
+      and the voxels. Must be an array with shape :math:`(N_d, N_s)`.
+    :param np.ndarray laplacian_matrix: The laplacian regularisation matrix of shape :math:`(N_s, N_s)`.
+    :param np.ndarray measurement_vector: The measured power/radiance vector with shape :math:`(N_d)`. 
+    :param initial_guess: An optional initial guess, can be an array of shape :math:`(N_s)` or a constant
+      value that will be used to seed the algorithm.
+    :param int max_iterations: The maximum number of iterations to run the SART algorithm before returning
+      a result, defaults to `max_iterations=250`.
+    :param float relaxation: The relaxation hyperparameter, defaults to `relaxation=1`. Consult the reference
+      papers for more information on this hyperparameter.
+    :param float beta_laplace: The regularisation hyperparameter in the range [0, 1]. Defaults
+      to `beta_laplace=0.01`.
+    :param float conv_tol: The convergence limit at which the algorithm will be terminated, unless the maximum
+      number of iterations has been reached. The convergence is calculated as the normalised squared difference
+      between the measurement and solution vectors.
+    :return: A tuple with the inverted solution vector :math:`\mathbf{x}` as an ndarray with shape :math:`(N_s)`,
+      and the convergence achieved as a float.
+    
+    .. code-block:: pycon
+   
+       >>> from cherab.tools.inversions import invert_constrained_sart
+       >>> inverted_solution, conv = invert_constrained_sart(weight_matrix, laplacian, observations)
+    """
+
+    cdef:
+        int m_observations, n_sources, ith_obs, jth_cell, k
+        list convergence
+        double x_j, x_j_new, relax_over_density, obs_diff, measurement_squared, y_hat_squared, adaptive_weight,
+        np.ndarray solution, solution_new, y_hat_vector, cell_ray_densities
+        double[:] obs_vector_mv, solution_mv, solution_new_mv, y_hat_vector_mv, cell_ray_densities_mv, inv_y_hat_mv, grad_penalty_mv
+        double[:, :] geometry_matrix_mv
+
+    m_observations, n_sources = geometry_matrix.shape  # (M, N) matrix
+
+    # Performing 1st iteration step using constrained SART
+    solution, convergence = invert_constrained_sart(geometry_matrix, laplacian_matrix, measurement_vector, initial_guess=initial_guess,
+                                                    max_iterations=1, relaxation=relaxation, beta_laplace=beta_laplace, conv_tol=conv_tol)
+
+    solution_mv = solution
+
+    solution_new = np.zeros(n_sources)
+    solution_new_mv = solution_new
+
+    obs_vector_mv = measurement_vector
+    geometry_matrix_mv = geometry_matrix
+
+    # A_(+,j)  - the total length of all rays passing through jth cell, equivalent to ray density
+    cell_ray_densities = np.sum(geometry_matrix, axis=0)
+    cell_ray_densities_mv = cell_ray_densities
+
+    y_hat_vector = np.dot(geometry_matrix, solution)
+    y_hat_vector_mv = y_hat_vector
+    inv_y_hat_mv = 1 / y_hat_vector
+
+    for k in range(1, max_iterations):
+
+        grad_penalty = np.dot(laplacian_matrix, solution) * beta_laplace
+        grad_penalty_mv = grad_penalty
+
+        for jth_cell in range(n_sources):
+
+            x_j = solution_mv[jth_cell]  # previous solution value for this cell
+
+            if cell_ray_densities_mv[jth_cell] > 0.0:
+
+                with cython.cdivision(True):
+                    relax_over_density = relaxation / cell_ray_densities_mv[jth_cell]
+
+                obs_diff = 0
+                for ith_obs in range(m_observations):
+                    if y_hat_vector_mv[ith_obs] == 0:
+                        continue
+                    adaptive_weight = geometry_matrix_mv[ith_obs, jth_cell] * x_j * inv_y_hat_mv[ith_obs]
+                    obs_diff += adaptive_weight * (obs_vector_mv[ith_obs] - y_hat_vector_mv[ith_obs])
+
+                x_j_new = x_j + relax_over_density * obs_diff - grad_penalty_mv[jth_cell]
+
+            # It is possible that some cells will have no rays passing through them.
+            else:
+                x_j_new = x_j - grad_penalty_mv[jth_cell]
+
+            # Don't allow negativity
+            if x_j_new < 0:
+                x_j_new = 0.0
+
+            solution_new_mv[jth_cell] = x_j_new
+
+        # Calculate how quickly the code is converging
+
+        y_hat_vector = np.dot(geometry_matrix, solution_new)
+        y_hat_vector_mv = y_hat_vector
+
+        measurement_squared = np.dot(measurement_vector, measurement_vector)
+        y_hat_squared = np.dot(y_hat_vector, y_hat_vector)
+        convergence.append((measurement_squared - y_hat_squared) / measurement_squared)
+
+        # Set the new solution to be the old solution and get ready to repeat
+        solution_mv[:] = solution_new_mv[:]
+
+        # Check for convergence
+        if k > 0:
+            if np.abs(convergence[k] - convergence[k - 1]) < conv_tol:
+                break
+
+    return solution, convergence

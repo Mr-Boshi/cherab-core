@@ -15,8 +15,6 @@
 //
 // See the Licence for the specific language governing permissions and limitations
 // under the Licence.
-//
-// The following code is created by Vladislav Neverov (NRC "Kurchatov Institute") for Cherab Spectroscopy Modelling Framework
 
 #ifndef BLOCK_SIZE
 #define BLOCK_SIZE 256
@@ -109,7 +107,6 @@ __kernel void sart_iteration(__global float * const restrict geometry_matrix, __
     const unsigned int tid = get_local_id(0);
     const unsigned int isource = get_group_id(0) * BLOCK_SIZE + tid;
     const float cell_ray_density = (isource < n_sources) ? cell_ray_densities[isource] : 0;
-    __local float inv_ray_lengths[BLOCK_SIZE];
     __local float diff_det[BLOCK_SIZE];
     float obs_diff = 0;
     for (unsigned int idet_step = 0; idet_step < m_detectors; idet_step += BLOCK_SIZE){
@@ -118,24 +115,24 @@ __kernel void sart_iteration(__global float * const restrict geometry_matrix, __
         barrier(CLK_LOCAL_MEM_FENCE);
         if (tid < idet_block_max) {
             const unsigned int idet = idet_step + tid;
-            inv_ray_lengths[tid] = ray_lengths[idet];
-            if (inv_ray_lengths[tid] > ZERO_CUT) inv_ray_lengths[tid] = 1.f / inv_ray_lengths[tid]; // inverting ray lengths if possible
-            diff_det[tid] = detectors[idet] - y_hat[idet];
+            float inv_ray_lengths = ray_lengths[idet];
+            if (inv_ray_lengths > ZERO_CUT) inv_ray_lengths = 1.f / inv_ray_lengths; // inverting ray lengths if possible
+            diff_det[tid] = inv_ray_lengths * (detectors[idet] - y_hat[idet]);
         }
         barrier(CLK_LOCAL_MEM_FENCE);
         if (cell_ray_density > ZERO_CUT) {
            if (!(idet_block_max % 4)) { // unroll 4 if possible
                 for (unsigned int idet_block = 0; idet_block < idet_block_max; idet_block += 4){
                     const unsigned int idet_base = idet_step + idet_block;
-                    obs_diff += geometry_matrix[idet_base       * n_sources + isource] * inv_ray_lengths[idet_block]     * diff_det[idet_block] + \
-                                geometry_matrix[(idet_base + 1) * n_sources + isource] * inv_ray_lengths[idet_block + 1] * diff_det[idet_block + 1] + \
-                                geometry_matrix[(idet_base + 2) * n_sources + isource] * inv_ray_lengths[idet_block + 2] * diff_det[idet_block + 2] + \
-                                geometry_matrix[(idet_base + 3) * n_sources + isource] * inv_ray_lengths[idet_block + 3] * diff_det[idet_block + 3];
+                    obs_diff += geometry_matrix[idet_base       * n_sources + isource] * diff_det[idet_block] + \
+                                geometry_matrix[(idet_base + 1) * n_sources + isource] * diff_det[idet_block + 1] + \
+                                geometry_matrix[(idet_base + 2) * n_sources + isource] * diff_det[idet_block + 2] + \
+                                geometry_matrix[(idet_base + 3) * n_sources + isource] * diff_det[idet_block + 3];
                 }
             }
             else {
                 for (unsigned int idet_block = 0; idet_block < idet_block_max; idet_block += 1){
-                    obs_diff += geometry_matrix[(idet_step + idet_block) * n_sources + isource] * inv_ray_lengths[idet_block] * diff_det[idet_block];
+                    obs_diff += geometry_matrix[(idet_step + idet_block) * n_sources + isource] * diff_det[idet_block];
                 }
             }
         }
@@ -147,4 +144,47 @@ __kernel void sart_iteration(__global float * const restrict geometry_matrix, __
     }
 }
 
+
+__kernel void saart_iteration(__global float * const restrict geometry_matrix, __global float * const restrict cell_ray_densities, \
+                              __global float * const restrict y_hat, __global float * const restrict detectors, \
+                              __global float * const restrict solution, __global float * const restrict grad_penalty, \
+                              const float relaxation, const unsigned int n_sources, const unsigned int m_detectors){
+    const unsigned int tid = get_local_id(0);
+    const unsigned int isource = get_group_id(0) * BLOCK_SIZE + tid;
+    const float cell_ray_density = (isource < n_sources) ? cell_ray_densities[isource] : 0;
+    __local float diff_det[BLOCK_SIZE];
+    float obs_diff = 0;
+    for (unsigned int idet_step = 0; idet_step < m_detectors; idet_step += BLOCK_SIZE){
+        unsigned int idet_block_max = m_detectors - idet_step;
+        if (idet_block_max > BLOCK_SIZE) idet_block_max = BLOCK_SIZE;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (tid < idet_block_max) {
+            const unsigned int idet = idet_step + tid;
+            float y_hat_local = y_hat[idet];
+            diff_det[tid] = (y_hat_local > ZERO_CUT) ? (detectors[idet] - y_hat_local) / y_hat_local : 0;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (cell_ray_density > ZERO_CUT) {
+           if (!(idet_block_max % 4)) { // unroll 4 if possible
+                for (unsigned int idet_block = 0; idet_block < idet_block_max; idet_block += 4){
+                    const unsigned int idet_base = idet_step + idet_block;
+                    obs_diff += geometry_matrix[idet_base       * n_sources + isource] * diff_det[idet_block] + \
+                                geometry_matrix[(idet_base + 1) * n_sources + isource] * diff_det[idet_block + 1] + \
+                                geometry_matrix[(idet_base + 2) * n_sources + isource] * diff_det[idet_block + 2] + \
+                                geometry_matrix[(idet_base + 3) * n_sources + isource] * diff_det[idet_block + 3];
+                }
+            }
+            else {
+                for (unsigned int idet_block = 0; idet_block < idet_block_max; idet_block += 1){
+                    obs_diff += geometry_matrix[(idet_step + idet_block) * n_sources + isource] * diff_det[idet_block];
+                }
+            }
+        }
+    }
+    if (isource < n_sources) {
+        const float solution_new = solution[isource] * (1.f + (obs_diff * relaxation) / (cell_ray_density + ZERO_CUT)) - grad_penalty[isource];
+        if (solution_new > 0) solution[isource] = solution_new;
+        else solution[isource] = 0;
+    }
+}
 

@@ -17,7 +17,7 @@
 # See the Licence for the specific language governing permissions and limitations
 # under the Licence.
 
-from .sart import invert_sart, invert_constrained_sart
+from .sart import invert_sart, invert_constrained_sart, invert_saart, invert_constrained_saart
 from .opencl import SartOpencl
 from .nnls import invert_regularised_nnls
 from .lstsq import invert_regularised_lstsq
