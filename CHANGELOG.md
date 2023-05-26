@@ -11,6 +11,10 @@ API changes:
 * The argument stark_model_coefficients of StarkBroadenedLine is now a tuple instead of a dict.
 * The argument line_parameters of ParametrisedZeemanTriplet is now a tuple instead of a dict.
 
+Bug fixes:
+* Fix beam width and density evaluation.
+* Fix beam direction evaluation. (#414)
+
 New:
 * Support Raysect 0.8
 * Add custom line shape support to BeamCXLine model. (#394)
