@@ -97,7 +97,7 @@ cdef class SingleRayAttenuator(BeamAttenuator):
         :return: Density in m^-3. 
         """
 
-        cdef double sigma_x, sigma_y, norm_radius_sqr, gaussian_sample
+        cdef double sigmaf_sqr, sigma_x, sigma_y, z_to_focal, norm_radius_sqr, gaussian_sample
 
         # use cached data if available
         if self._stopping_data is None:
@@ -107,8 +107,10 @@ cdef class SingleRayAttenuator(BeamAttenuator):
             self._calc_attenuation()
 
         # calculate beam width
-        sigma_x = self._beam.get_sigma() + z * self._tanxdiv
-        sigma_y = self._beam.get_sigma() + z * self._tanydiv
+        sigmaf_sqr = self._beam.get_sigma()**2  # sigma at beam focus
+        z_to_focal = z - self._beam.get_focal_length()
+        sigma_x = sqrt(sigmaf_sqr + (z_to_focal * self._tanxdiv)**2)
+        sigma_y = sqrt(sigmaf_sqr + (z_to_focal * self._tanydiv)**2)
 
         # normalised radius squared
         norm_radius_sqr = ((x / sigma_x)**2 + (y / sigma_y)**2)

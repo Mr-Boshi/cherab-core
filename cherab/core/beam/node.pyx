@@ -30,7 +30,7 @@ from cherab.core.beam.material cimport BeamMaterial
 from cherab.core.beam.model cimport BeamModel
 from cherab.core.atomic cimport AtomicData, Element
 from cherab.core.utility import Notifier
-from libc.math cimport tan, M_PI
+from libc.math cimport tan, sqrt, M_PI
 
 
 cdef double DEGREES_TO_RADIANS = M_PI / 180
@@ -141,7 +141,8 @@ cdef class Beam(Node):
       emission models for this beam.
     :ivar Plasma plasma: The plasma instance with which this beam interacts.
     :ivar float power: The total beam power in W.
-    :ivar float sigma: The Gaussian beam width at the origin in m.
+    :ivar float sigma: The Gaussian beam dispersion at the beam focus in m.
+    :ivar float focal_length: The Gaussian beam focal length in m.
     :ivar float temperature: The broadening of the beam (eV).
 
     .. code-block:: pycon
@@ -188,8 +189,11 @@ cdef class Beam(Node):
         self._element = element = None             # beam species, an Element object
         self._divergence_x = 0.0                   # beam divergence x (degrees)
         self._divergence_y = 0.0                   # beam divergence y (degrees)
+        self._tanxdiv = 0.0                        # tan(DEGREES_TO_RADIANS * divergence_x)
+        self._tanydiv = 0.0                        # tan(DEGREES_TO_RADIANS * divergence_y)
         self._length = 1.0                         # m
-        self._sigma = 0.1                          # m (gaussian beam width at origin)
+        self._sigma = 0.1                          # m (gaussian beam dispersion at beam focus)
+        self._focal_length = 0                     # m (gaussian beam focal length)
 
         # external data dependencies
         self._plasma = None
@@ -244,13 +248,23 @@ cdef class Beam(Node):
         """
 
         # if behind the beam just return the beam axis (for want of a better value)
-        if z <= 0:
+        if z < 0 or z == self._focal_length:
             return self.BEAM_AXIS
 
         # calculate direction from divergence
-        cdef double dx = tan(DEGREES_TO_RADIANS * self._divergence_x)
-        cdef double dy = tan(DEGREES_TO_RADIANS * self._divergence_y)
-        return new_vector3d(dx, dy, 1.0).normalise()
+        cdef double z_to_focal = z - self._focal_length
+        cdef double z_tanx_sqr = z_to_focal * z_to_focal * self._tanxdiv * self._tanxdiv
+        cdef double z_tany_sqr = z_to_focal * z_to_focal * self._tanydiv * self._tanydiv
+        cdef double sigma_sqr = self._sigma * self._sigma
+        cdef double sigma_x_sqr = sigma_sqr + z_tanx_sqr
+        cdef double sigma_y_sqr = sigma_sqr + z_tany_sqr
+        cdef double ex = x * z_tanx_sqr / sigma_x_sqr
+        cdef double ey = y * z_tany_sqr / sigma_y_sqr
+
+        if z_to_focal > 0:
+            return new_vector3d(ex, ey, z_to_focal).normalise()
+
+        return new_vector3d(-ex, -ey, -z_to_focal).normalise()
 
     @property
     def energy(self):
@@ -315,6 +329,7 @@ cdef class Beam(Node):
         if value < 0:
             raise ValueError('Beam x divergence cannot be less than zero.')
         self._divergence_x = value
+        self._tanxdiv = tan(DEGREES_TO_RADIANS * value)
         self.notifier.notify()
 
     cdef double get_divergence_x(self):
@@ -329,6 +344,7 @@ cdef class Beam(Node):
         if value < 0:
             raise ValueError('Beam y divergence cannot be less than zero.')
         self._divergence_y = value
+        self._tanydiv = tan(DEGREES_TO_RADIANS * value)
         self.notifier.notify()
 
     cdef double get_divergence_y(self):
@@ -363,6 +379,20 @@ cdef class Beam(Node):
         return self._sigma
 
     @property
+    def focal_length(self):
+        return self._focal_length
+
+    @focal_length.setter
+    def focal_length(self, double value):
+        if value < 0:
+            raise ValueError('Beam focal_length cannot be less than zero.')
+        self._focal_length = value
+        self.notifier.notify()
+
+    cdef double get_focal_length(self):
+        return self._focal_length
+
+    @property
     def atomic_data(self):
         return self._atomic_data
 
@@ -388,7 +418,7 @@ cdef class Beam(Node):
     @property
     def attenuator(self):
         return self._attenuator
-    
+
     @attenuator.setter
     def attenuator(self, BeamAttenuator value not None):
 
@@ -500,29 +530,43 @@ cdef class Beam(Node):
         drdz = tan(DEGREES_TO_RADIANS * max(self._divergence_x, self._divergence_y))
 
         # radii of bounds at the beam origin (z=0) and the beam end (z=length)
-        radius_start = num_sigma * self.sigma
-        radius_end = radius_start + self.length * num_sigma * drdz
+        sigma_at_start = sqrt(self.sigma**2 + self.focal_length**2 * drdz**2)
+        sigma_at_end = sqrt(self.sigma**2 + (self.length - self.focal_length)**2 * drdz**2)
+        radius_start = num_sigma * sigma_at_start
+        radius_end = num_sigma * sigma_at_end
 
-        # distance of the cone apex to the beam origin
-        distance_apex = radius_start / (num_sigma * drdz)
+        if radius_start == radius_end:
+            return Cylinder(radius_start, height=self.length)
+
+        if radius_start < radius_end:
+            # distance of the cone apex to the beam origin
+            distance_apex = radius_start * self.length / (radius_end - radius_start)
+            # cone has to be rotated by 180 deg and shifted by beam length in the +z direction
+            cone_transform = translate(0, 0, self.length) * rotate_x(180)
+            cone_base_radius = radius_end
+            cone_tip_radius = radius_start
+        else:
+            # distance of the cone apex to the beam end
+            distance_apex = radius_end * self.length / (radius_start - radius_end)
+            cone_transform = None
+            cone_base_radius = radius_start
+            cone_tip_radius = radius_end
+
         cone_height = self.length + distance_apex
 
         # calculate volumes
-        cylinder_volume = self.length * M_PI * radius_end**2
-        cone_volume = M_PI * (cone_height * radius_end**2 - distance_apex * radius_start**2) / 3
+        cylinder_volume = self.length * M_PI * cone_base_radius**2
+        cone_volume = M_PI * (cone_height * cone_base_radius**2 - distance_apex * cone_tip_radius**2) / 3
         volume_ratio = cone_volume / cylinder_volume
 
         # if the volume difference is <10%, generate a cylinder
         if volume_ratio > 0.9:
-            return Cylinder(num_sigma * self.sigma, height=self.length)
-
-        # cone has to be rotated by 180 deg and shifted by beam length in the +z direction
-        cone_transform = translate(0, 0, self.length) * rotate_x(180)
+            return Cylinder(cone_base_radius, height=self.length)
 
         # create cone and cut off -z protrusion
         return Intersect(
-            Cone(radius_end, cone_height, transform=cone_transform),
-            Cylinder(radius_end * 1.01, self.length * 1.01)
+            Cone(cone_base_radius, cone_height, transform=cone_transform),
+            Cylinder(cone_base_radius * 1.01, self.length * 1.01)
         )
 
     def _configure_attenuator(self):
