@@ -371,15 +371,7 @@ cdef class Beam(Node):
     def sigma_x(self):
         return self._sigma_x
 
-    @sigma.setter
-    def sigma(self, double value):
-        if value <= 0:
-            raise ValueError('Beam sigma (width) must be greater than zero.')
-        self._sigma_x = value
-        self._sigma_y = value
-        self.notifier.notify()
-
-    @sigma.setter
+    @sigma_x.setter
     def sigma_x(self, double value):
         if value <= 0:
             raise ValueError('Beam sigma (width) must be greater than zero.')
@@ -393,7 +385,7 @@ cdef class Beam(Node):
     def sigma_y(self):
         return self._sigma_y
 
-    @sigma.setter
+    @sigma_y.setter
     def sigma_y(self, double value):
         if value <= 0:
             raise ValueError('Beam sigma (width) must be greater than zero.')
