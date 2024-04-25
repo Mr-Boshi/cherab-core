@@ -107,10 +107,11 @@ cdef class SingleRayAttenuator(BeamAttenuator):
             self._calc_attenuation()
 
         # calculate beam width
-        sigmaf_sqr = self._beam.get_sigma()**2  # sigma at beam focus
+        sigmaf_sqr_x = self._beam.get_sigma_x()**2  # sigma_x at beam focus
+        sigmaf_sqr_y = self._beam.get_sigma_y()**2  # sigma_y at beam focus
         z_to_focal = z - self._beam.get_focal_length()
-        sigma_x = sqrt(sigmaf_sqr + (z_to_focal * self._tanxdiv)**2)
-        sigma_y = sqrt(sigmaf_sqr + (z_to_focal * self._tanydiv)**2)
+        sigma_x = sqrt(sigmaf_sqr_x + (z_to_focal * self._tanxdiv)**2)
+        sigma_y = sqrt(sigmaf_sqr_y + (z_to_focal * self._tanydiv)**2)
 
         # normalised radius squared
         norm_radius_sqr = ((x / sigma_x)**2 + (y / sigma_y)**2)

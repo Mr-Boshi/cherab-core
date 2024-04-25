@@ -165,7 +165,8 @@ cdef class Beam(Node):
        >>> beam.energy = 60000
        >>> beam.power = 1e4
        >>> beam.element = deuterium
-       >>> beam.sigma = 0.025
+       >>> beam.sigma_x = 0.025
+       >>> beam.sigma_y = 0.025
        >>> beam.divergence_x = 0.5
        >>> beam.divergence_y = 0.5
        >>> beam.length = 3.0
@@ -192,7 +193,8 @@ cdef class Beam(Node):
         self._tanxdiv = 0.0                        # tan(DEGREES_TO_RADIANS * divergence_x)
         self._tanydiv = 0.0                        # tan(DEGREES_TO_RADIANS * divergence_y)
         self._length = 1.0                         # m
-        self._sigma = 0.1                          # m (gaussian beam width at beam focus)
+        self._sigma_x = 0.1                        # m (gaussian beam width at beam focus for non-round beams)                       
+        self._sigma_y = 0.1                        # m (gaussian beam width at beam focus for non-round beams)                       
         self._focal_length = 0                     # m (gaussian beam focal length)
 
         # external data dependencies
@@ -255,9 +257,10 @@ cdef class Beam(Node):
         cdef double z_to_focal = z - self._focal_length
         cdef double z_tanx_sqr = z_to_focal * z_to_focal * self._tanxdiv * self._tanxdiv
         cdef double z_tany_sqr = z_to_focal * z_to_focal * self._tanydiv * self._tanydiv
-        cdef double sigma_sqr = self._sigma * self._sigma
-        cdef double sigma_x_sqr = sigma_sqr + z_tanx_sqr
-        cdef double sigma_y_sqr = sigma_sqr + z_tany_sqr
+        cdef double sigma_sqr_x = self._sigma_x * self._sigma_x
+        cdef double sigma_sqr_y = self._sigma_y * self._sigma_y
+        cdef double sigma_x_sqr = sigma_sqr_x + z_tanx_sqr
+        cdef double sigma_y_sqr = sigma_sqr_y + z_tany_sqr
         cdef double ex = x * z_tanx_sqr / sigma_x_sqr
         cdef double ey = y * z_tany_sqr / sigma_y_sqr
 
@@ -365,18 +368,40 @@ cdef class Beam(Node):
         return self._length
 
     @property
-    def sigma(self):
-        return self._sigma
+    def sigma_x(self):
+        return self._sigma_x
 
     @sigma.setter
     def sigma(self, double value):
         if value <= 0:
             raise ValueError('Beam sigma (width) must be greater than zero.')
-        self._sigma = value
+        self._sigma_x = value
+        self._sigma_y = value
         self.notifier.notify()
 
-    cdef double get_sigma(self):
-        return self._sigma
+    @sigma.setter
+    def sigma_x(self, double value):
+        if value <= 0:
+            raise ValueError('Beam sigma (width) must be greater than zero.')
+        self._sigma_x = value
+        self.notifier.notify()
+
+    cdef double get_sigma_x(self):
+        return self._sigma_x
+
+    @property
+    def sigma_y(self):
+        return self._sigma_y
+
+    @sigma.setter
+    def sigma_y(self, double value):
+        if value <= 0:
+            raise ValueError('Beam sigma (width) must be greater than zero.')
+        self._sigma_y = value
+        self.notifier.notify()
+
+    cdef double get_sigma_y(self):
+        return self._sigma_y
 
     @property
     def focal_length(self):
@@ -519,19 +544,20 @@ cdef class Beam(Node):
 
         # number of beam sigma the bounding volume lies from the beam axis
         num_sigma = self._attenuator.clamp_sigma
+        max_sigma = max(self._sigma_x, self._sigma_y)
 
         # return Cylinder(NUM_SIGMA * self.sigma, height=self.length)
 
         # no divergence, use a cylinder
         if self._divergence_x == 0 and self._divergence_y == 0:
-            return Cylinder(num_sigma * self.sigma, height=self.length)
+            return Cylinder(num_sigma * max_sigma, height=self.length)
 
         # rate of change of beam radius with z (using largest divergence)
         drdz = tan(DEGREES_TO_RADIANS * max(self._divergence_x, self._divergence_y))
 
         # radii of bounds at the beam origin (z=0) and the beam end (z=length)
-        sigma_at_start = sqrt(self.sigma**2 + self.focal_length**2 * drdz**2)
-        sigma_at_end = sqrt(self.sigma**2 + (self.length - self.focal_length)**2 * drdz**2)
+        sigma_at_start = sqrt(max_sigma**2 + self.focal_length**2 * drdz**2)
+        sigma_at_end = sqrt(max_sigma**2 + (self.length - self.focal_length)**2 * drdz**2)
         radius_start = num_sigma * sigma_at_start
         radius_end = num_sigma * sigma_at_end
 

@@ -48,7 +48,7 @@ cdef class Beam(Node):
         double _energy, _power, _temperature
         Element _element
         double _divergence_x, _divergence_y, _tanxdiv, _tanydiv
-        double _length, _sigma, _focal_length
+        double _length, _sigma_x, _sigma_y, _focal_length
         Plasma _plasma
         AtomicData _atomic_data
         ModelManager _models
@@ -78,7 +78,9 @@ cdef class Beam(Node):
 
     cdef double get_focal_length(self)
 
-    cdef double get_sigma(self)
+    cdef double get_sigma_x(self)
+
+    cdef double get_sigma_y(self)
 
     cdef Plasma get_plasma(self)
 
