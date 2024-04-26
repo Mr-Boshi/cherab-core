@@ -383,6 +383,12 @@ cdef class Beam(Node):
         self._sigma_y = value
         self.notifier.notify()
 
+    cdef double get_sigma(self):
+        if self._sigma_x == self._sigma_y:
+            return self._sigma_x
+        else:
+            raise NotImplementedError("This method is only suitable for round beams")
+
     @property
     def sigma_x(self):
         return self._sigma_x

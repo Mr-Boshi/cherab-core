@@ -78,6 +78,8 @@ cdef class Beam(Node):
 
     cdef double get_focal_length(self)
 
+    cdef double get_sigma(self)
+
     cdef double get_sigma_x(self)
 
     cdef double get_sigma_y(self)
