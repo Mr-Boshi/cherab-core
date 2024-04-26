@@ -193,6 +193,7 @@ cdef class Beam(Node):
         self._tanxdiv = 0.0                        # tan(DEGREES_TO_RADIANS * divergence_x)
         self._tanydiv = 0.0                        # tan(DEGREES_TO_RADIANS * divergence_y)
         self._length = 1.0                         # m
+        self._sigma  = 0.1                         # m (gaussian beam width at beam focus round beams)
         self._sigma_x = 0.1                        # m (gaussian beam width at beam focus for non-round beams)                       
         self._sigma_y = 0.1                        # m (gaussian beam width at beam focus for non-round beams)                       
         self._focal_length = 0                     # m (gaussian beam focal length)
@@ -366,6 +367,21 @@ cdef class Beam(Node):
 
     cdef double get_length(self):
         return self._length
+
+    @property
+    def sigma(self):
+        if self._sigma_x == self._sigma_y:
+            return self._sigma_x
+        else:
+            raise NotImplementedError("This property is only suitable for round beams")
+
+    @sigma.setter
+    def sigma(self, double value):
+        if value <= 0:
+            raise ValueError('Beam sigma (width) must be greater than zero.')
+        self._sigma_x = value
+        self._sigma_y = value
+        self.notifier.notify()
 
     @property
     def sigma_x(self):
